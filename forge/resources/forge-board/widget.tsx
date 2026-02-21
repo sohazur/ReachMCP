@@ -54,14 +54,35 @@ function patchByIds(
 }
 
 // Try to extract a ForgeSpec from whatever shape the props might be
+function tryParse(val: any): any {
+  if (typeof val !== "string") return val;
+  try { return JSON.parse(val); } catch { return val; }
+}
+
 function extractSpec(raw: any): ForgeSpec | null {
   if (!raw) return null;
+
+  // If raw itself is a string, parse it
+  const parsed = tryParse(raw);
+  if (parsed !== raw) return extractSpec(parsed);
+
   // Direct spec: { title, layout, ... }
   if (raw.title && raw.layout) return raw as ForgeSpec;
+
+  // spec field might be a string that needs parsing
+  const specVal = tryParse(raw.spec);
+
   // Wrapped: { spec: { title, layout, ... } }
-  if (raw.spec && raw.spec.title && raw.spec.layout) return raw.spec as ForgeSpec;
+  if (specVal && specVal.title && specVal.layout) return specVal as ForgeSpec;
+  // Double-wrapped: { spec: { spec: { ... } } }
+  if (specVal && specVal.spec) {
+    const inner = tryParse(specVal.spec);
+    if (inner && inner.title && inner.layout) return inner as ForgeSpec;
+  }
   // Action-wrapped: { action: "render", spec: { ... } }
-  if (raw.action === "render" && raw.spec) return raw.spec as ForgeSpec;
+  if (raw.action === "render" && specVal) {
+    if (specVal.title && specVal.layout) return specVal as ForgeSpec;
+  }
   return null;
 }
 
