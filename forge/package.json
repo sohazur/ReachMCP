@@ -30,7 +30,6 @@
   "dependencies": {
     "@openai/apps-sdk-ui": "^0.2.1",
     "firebase": "^12.9.0",
-    "firebase-admin": "^13.6.1",
     "jose": "^6.1.3",
     "mcp-use": "latest",
     "react": "^19.2.4",

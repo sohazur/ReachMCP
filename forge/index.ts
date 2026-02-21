@@ -1,11 +1,34 @@
 import { MCPServer, text, widget, object, error, oauthCustomProvider } from "mcp-use/server";
 import { z } from "zod";
-import { adminAuth, db, SESSIONS_COLLECTION, USERS_COLLECTION, CONNECTED_MCPS_COLLECTION } from "./firebase.js";
-import { FieldValue } from "firebase-admin/firestore";
+import { createRemoteJWKSet, jwtVerify } from "jose";
+import {
+  db,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  addDoc,
+  setDoc,
+  updateDoc,
+  query,
+  where,
+  orderBy,
+  firestoreLimit,
+  serverTimestamp,
+  increment,
+  SESSIONS_COLLECTION,
+  USERS_COLLECTION,
+  CONNECTED_MCPS_COLLECTION,
+} from "./firebase.js";
 
 // ── Firebase Auth via Custom OAuth Provider ────────────────────
+// Uses Google's public JWKS to verify Firebase ID tokens — NO service account needed
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+
+const FIREBASE_JWKS = createRemoteJWKSet(
+  new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
+);
 
 const firebaseOAuth = FIREBASE_PROJECT_ID && FIREBASE_API_KEY
   ? oauthCustomProvider({
@@ -14,17 +37,12 @@ const firebaseOAuth = FIREBASE_PROJECT_ID && FIREBASE_API_KEY
       authEndpoint: `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
       tokenEndpoint: `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`,
       verifyToken: async (token: string) => {
-        const decoded = await adminAuth.verifyIdToken(token);
-        return {
-          payload: {
-            sub: decoded.uid,
-            email: decoded.email,
-            name: decoded.name || decoded.email?.split("@")[0],
-            picture: decoded.picture,
-            email_verified: decoded.email_verified,
-            firebase: decoded.firebase,
-          },
-        };
+        // Verify Firebase ID token using Google's public keys (no service account!)
+        const result = await jwtVerify(token, FIREBASE_JWKS, {
+          issuer: `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`,
+          audience: FIREBASE_PROJECT_ID,
+        });
+        return result;
       },
       getUserInfo: (payload: Record<string, unknown>) => ({
         userId: payload.sub as string,
@@ -61,7 +79,7 @@ function getUserId(ctx: any): string | null {
 }
 
 // ══════════════════════════════════════════════════════════════════
-// CORE TOOLS (existing, enhanced with auth context)
+// CORE TOOLS
 // ══════════════════════════════════════════════════════════════════
 
 // ── Tool 1: forge_view ─────────────────────────────────────────
@@ -236,7 +254,7 @@ server.tool(
 );
 
 // ══════════════════════════════════════════════════════════════════
-// PERSISTENCE TOOLS (Firebase Firestore)
+// PERSISTENCE TOOLS (Firebase Firestore — Web SDK, no service account)
 // ══════════════════════════════════════════════════════════════════
 
 // ── Tool 4: forge_save ─────────────────────────────────────────
@@ -265,45 +283,47 @@ server.tool(
         .describe("The verdict if one was generated"),
     }),
   },
-  async ({ session_id, title, spec, widget_state, verdict }, ctx) => {
+  async ({ session_id, title, spec: specData, widget_state, verdict: verdictData }, ctx) => {
     try {
       const userId = getUserId(ctx) || "anonymous";
 
       const sessionData = {
         user_id: userId,
         title,
-        spec,
+        spec: specData,
         widget_state: widget_state || {},
-        verdict: verdict || null,
-        updated_at: FieldValue.serverTimestamp(),
+        verdict: verdictData || null,
+        updated_at: serverTimestamp(),
       };
 
       let docId: string;
 
       if (session_id) {
         // Update existing session
-        const docRef = db.collection(SESSIONS_COLLECTION).doc(session_id);
-        const doc = await docRef.get();
-        if (doc.exists && doc.data()?.user_id === userId) {
-          await docRef.update(sessionData);
+        const docRef = doc(db, SESSIONS_COLLECTION, session_id);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists() && docSnap.data()?.user_id === userId) {
+          await updateDoc(docRef, sessionData);
           docId = session_id;
         } else {
           return error("Session not found or access denied");
         }
       } else {
         // Create new session
-        const docRef = await db.collection(SESSIONS_COLLECTION).add({
+        const colRef = collection(db, SESSIONS_COLLECTION);
+        const docRef = await addDoc(colRef, {
           ...sessionData,
-          created_at: FieldValue.serverTimestamp(),
+          created_at: serverTimestamp(),
         });
         docId = docRef.id;
       }
 
       // Also update user's last activity
-      await db.collection(USERS_COLLECTION).doc(userId).set(
-        { last_active: FieldValue.serverTimestamp(), session_count: FieldValue.increment(session_id ? 0 : 1) },
-        { merge: true }
-      );
+      const userRef = doc(db, USERS_COLLECTION, userId);
+      await setDoc(userRef, {
+        last_active: serverTimestamp(),
+        session_count: increment(session_id ? 0 : 1),
+      }, { merge: true });
 
       return object({ session_id: docId, status: "saved", title });
     } catch (err) {
@@ -332,13 +352,14 @@ server.tool(
   async ({ session_id }, ctx) => {
     try {
       const userId = getUserId(ctx) || "anonymous";
-      const doc = await db.collection(SESSIONS_COLLECTION).doc(session_id).get();
+      const docRef = doc(db, SESSIONS_COLLECTION, session_id);
+      const docSnap = await getDoc(docRef);
 
-      if (!doc.exists) {
+      if (!docSnap.exists()) {
         return error("Session not found");
       }
 
-      const data = doc.data()!;
+      const data = docSnap.data();
       if (data.user_id !== userId) {
         return error("Access denied: this session belongs to another user");
       }
@@ -381,20 +402,22 @@ server.tool(
     try {
       const userId = getUserId(ctx) || "anonymous";
 
-      const snapshot = await db
-        .collection(SESSIONS_COLLECTION)
-        .where("user_id", "==", userId)
-        .orderBy("updated_at", "desc")
-        .limit(limit)
-        .get();
+      const q = query(
+        collection(db, SESSIONS_COLLECTION),
+        where("user_id", "==", userId),
+        orderBy("updated_at", "desc"),
+        firestoreLimit(limit)
+      );
 
-      const sessions = snapshot.docs.map((doc) => ({
-        session_id: doc.id,
-        title: doc.data().title,
-        has_verdict: !!doc.data().verdict,
-        state_keys: Object.keys(doc.data().widget_state || {}).length,
-        created_at: doc.data().created_at?.toDate?.()?.toISOString() || null,
-        updated_at: doc.data().updated_at?.toDate?.()?.toISOString() || null,
+      const snapshot = await getDocs(q);
+
+      const sessions = snapshot.docs.map((d) => ({
+        session_id: d.id,
+        title: d.data().title,
+        has_verdict: !!d.data().verdict,
+        state_keys: Object.keys(d.data().widget_state || {}).length,
+        created_at: d.data().created_at?.toDate?.()?.toISOString?.() || null,
+        updated_at: d.data().updated_at?.toDate?.()?.toISOString?.() || null,
       }));
 
       if (sessions.length === 0) {
@@ -432,8 +455,9 @@ server.tool(
       }
 
       // Get user activity from Firestore
-      const userDoc = await db.collection(USERS_COLLECTION).doc(userId).get();
-      const userData = userDoc.exists ? userDoc.data() : null;
+      const userRef = doc(db, USERS_COLLECTION, userId);
+      const userSnap = await getDoc(userRef);
+      const userData = userSnap.exists() ? userSnap.data() : null;
 
       return object({
         authenticated: true,
@@ -441,7 +465,7 @@ server.tool(
         email: (ctx as any).auth?.user?.email || null,
         name: (ctx as any).auth?.user?.name || null,
         session_count: userData?.session_count || 0,
-        last_active: userData?.last_active?.toDate?.()?.toISOString() || null,
+        last_active: userData?.last_active?.toDate?.()?.toISOString?.() || null,
       });
     } catch (err) {
       return object({
@@ -474,37 +498,23 @@ The connected MCP's tools become available as actions within Forge workspaces. C
         .string()
         .optional()
         .describe("What this MCP does and what tools it provides"),
-      auth_token: z
-        .string()
-        .optional()
-        .describe("Bearer token for authenticating with the external MCP"),
     }),
   },
-  async ({ mcp_url, mcp_name, description, auth_token }, ctx) => {
+  async ({ mcp_url, mcp_name, description: desc }, ctx) => {
     try {
       const userId = getUserId(ctx) || "anonymous";
 
-      // Store connection config in Firestore
       const connectionData = {
         user_id: userId,
         mcp_url,
         mcp_name,
-        description: description || "",
-        has_auth: !!auth_token,
+        description: desc || "",
         status: "connected",
-        connected_at: FieldValue.serverTimestamp(),
+        connected_at: serverTimestamp(),
       };
 
-      // Store auth token separately if provided (not in the main doc for security)
-      const docRef = await db.collection(CONNECTED_MCPS_COLLECTION).add(connectionData);
-
-      if (auth_token) {
-        // Store token in a subcollection for security isolation
-        await docRef.collection("secrets").doc("auth").set({
-          token: auth_token,
-          updated_at: FieldValue.serverTimestamp(),
-        });
-      }
+      const colRef = collection(db, CONNECTED_MCPS_COLLECTION);
+      const docRef = await addDoc(colRef, connectionData);
 
       return object({
         connection_id: docRef.id,
@@ -531,20 +541,21 @@ server.tool(
     try {
       const userId = getUserId(ctx) || "anonymous";
 
-      const snapshot = await db
-        .collection(CONNECTED_MCPS_COLLECTION)
-        .where("user_id", "==", userId)
-        .orderBy("connected_at", "desc")
-        .get();
+      const q = query(
+        collection(db, CONNECTED_MCPS_COLLECTION),
+        where("user_id", "==", userId),
+        orderBy("connected_at", "desc")
+      );
 
-      const connections = snapshot.docs.map((doc) => ({
-        connection_id: doc.id,
-        mcp_name: doc.data().mcp_name,
-        mcp_url: doc.data().mcp_url,
-        description: doc.data().description,
-        status: doc.data().status,
-        has_auth: doc.data().has_auth,
-        connected_at: doc.data().connected_at?.toDate?.()?.toISOString() || null,
+      const snapshot = await getDocs(q);
+
+      const connections = snapshot.docs.map((d) => ({
+        connection_id: d.id,
+        mcp_name: d.data().mcp_name,
+        mcp_url: d.data().mcp_url,
+        description: d.data().description,
+        status: d.data().status,
+        connected_at: d.data().connected_at?.toDate?.()?.toISOString?.() || null,
       }));
 
       if (connections.length === 0) {

@@ -1,22 +1,52 @@
-import { initializeApp, cert, type ServiceAccount } from "firebase-admin/app";
-import { getAuth } from "firebase-admin/auth";
-import { getFirestore } from "firebase-admin/firestore";
+import { initializeApp } from "firebase/app";
+import { getAuth } from "firebase/auth";
+import {
+  getFirestore,
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  addDoc,
+  setDoc,
+  updateDoc,
+  query,
+  where,
+  orderBy,
+  limit as firestoreLimit,
+  serverTimestamp,
+  increment,
+} from "firebase/firestore";
 
-// Initialize Firebase Admin SDK
-const serviceAccount = process.env.FIREBASE_SERVICE_ACCOUNT_JSON
-  ? JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON)
-  : undefined;
+// ── Firebase Web SDK config (no service account needed) ────────
+const firebaseConfig = {
+  apiKey: process.env.FIREBASE_API_KEY,
+  authDomain: `${process.env.FIREBASE_PROJECT_ID}.firebaseapp.com`,
+  projectId: process.env.FIREBASE_PROJECT_ID,
+};
 
-const app = initializeApp(
-  serviceAccount
-    ? { credential: cert(serviceAccount as ServiceAccount) }
-    : { projectId: process.env.FIREBASE_PROJECT_ID }
-);
+const app = initializeApp(firebaseConfig);
 
-export const adminAuth = getAuth(app);
+export const auth = getAuth(app);
 export const db = getFirestore(app);
 
-// Collection references
+// Re-export Firestore helpers for use in index.ts
+export {
+  collection,
+  doc,
+  getDoc,
+  getDocs,
+  addDoc,
+  setDoc,
+  updateDoc,
+  query,
+  where,
+  orderBy,
+  firestoreLimit,
+  serverTimestamp,
+  increment,
+};
+
+// Collection names
 export const SESSIONS_COLLECTION = "forge_sessions";
 export const USERS_COLLECTION = "forge_users";
 export const CONNECTED_MCPS_COLLECTION = "forge_connected_mcps";
