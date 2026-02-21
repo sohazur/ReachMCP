@@ -1,7 +1,7 @@
 import { McpUseProvider, useCallTool, useWidget, type WidgetMetadata } from "mcp-use/react";
 import React, { useEffect, useState, useCallback, useRef } from "react";
 import "../styles.css";
-import type { ForgeWidgetProps, ForgeSpec, Verdict, LayoutNode, ComponentNode } from "./types";
+import type { ForgeSpec, Verdict, LayoutNode, ComponentNode } from "./types";
 import { propSchema, isContainerNode } from "./types";
 import { SpecRenderer } from "./SpecRenderer";
 import { VerdictPanel } from "./components/VerdictPanel";
@@ -53,59 +53,98 @@ function patchByIds(
   });
 }
 
+// Try to extract a ForgeSpec from whatever shape the props might be
+function extractSpec(raw: any): ForgeSpec | null {
+  if (!raw) return null;
+  // Direct spec: { title, layout, ... }
+  if (raw.title && raw.layout) return raw as ForgeSpec;
+  // Wrapped: { spec: { title, layout, ... } }
+  if (raw.spec && raw.spec.title && raw.spec.layout) return raw.spec as ForgeSpec;
+  // Action-wrapped: { action: "render", spec: { ... } }
+  if (raw.action === "render" && raw.spec) return raw.spec as ForgeSpec;
+  return null;
+}
+
+function extractUpdate(raw: any): { operation: string; components?: any[]; ids?: string[]; patches?: any[] } | null {
+  if (!raw) return null;
+  if (raw.action === "update" && raw.operation) return raw;
+  if (raw.operation) return raw;
+  return null;
+}
+
+function extractVerdict(raw: any): Verdict | null {
+  if (!raw) return null;
+  if (raw.action === "conclude" && raw.verdict) return raw.verdict;
+  if (raw.verdict) return raw.verdict;
+  if (raw.winner && raw.reasoning) return raw as Verdict;
+  return null;
+}
+
 // ── Main Component ─────────────────────────────────────────────
 const ForgeBoard: React.FC = () => {
-  const { props, isPending, sendFollowUpMessage } = useWidget<ForgeWidgetProps>();
+  const { props, isPending, sendFollowUpMessage } = useWidget();
 
   const { callTool: callForgeUpdate, isPending: isUpdating } = useCallTool("forge_update");
   const { callTool: callForgeConclude, isPending: isConcluding } = useCallTool("forge_conclude");
 
-  // Core state
   const [spec, setSpec] = useState<ForgeSpec | null>(null);
   const [widgetState, setWidgetState] = useState<Record<string, any>>({});
   const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const [debugInfo, setDebugInfo] = useState<string>("");
   const prevTitle = useRef<string>("");
 
-  // ── Process incoming props ─────────────────────────────────
+  // ── Process incoming props — flexible shape detection ───────
   useEffect(() => {
     if (!props) return;
 
-    // Handle both direct spec and action-based props
-    const action = (props as any).action;
-    const incomingSpec = (props as any).spec;
+    // Log for debugging
+    try {
+      setDebugInfo(JSON.stringify(props, null, 2).slice(0, 500));
+    } catch { setDebugInfo("(could not serialize props)"); }
 
-    if (action === "render" && incomingSpec) {
+    // Try to extract a spec (handles multiple wrapper shapes)
+    const incomingSpec = extractSpec(props);
+    if (incomingSpec) {
       if (incomingSpec.title !== prevTitle.current) {
         setWidgetState({});
         setVerdict(null);
       }
       prevTitle.current = incomingSpec.title ?? "";
       setSpec(incomingSpec);
-    } else if (action === "update") {
+      return;
+    }
+
+    // Try to extract an update
+    const update = extractUpdate(props);
+    if (update && spec) {
       setSpec((prev) => {
         if (!prev) return prev;
         const newSpec = { ...prev, layout: [...prev.layout] };
-        const op = (props as any).operation;
-        if (op === "add" && (props as any).components) {
-          newSpec.layout = [...newSpec.layout, ...((props as any).components as LayoutNode[])];
-        } else if (op === "remove" && (props as any).ids) {
-          newSpec.layout = removeByIds(newSpec.layout, (props as any).ids);
-        } else if (op === "patch" && (props as any).patches) {
-          newSpec.layout = patchByIds(newSpec.layout, (props as any).patches);
+        if (update.operation === "add" && update.components) {
+          newSpec.layout = [...newSpec.layout, ...(update.components as LayoutNode[])];
+        } else if (update.operation === "remove" && update.ids) {
+          newSpec.layout = removeByIds(newSpec.layout, update.ids);
+        } else if (update.operation === "patch" && update.patches) {
+          newSpec.layout = patchByIds(newSpec.layout, update.patches);
         }
         return newSpec;
       });
-    } else if (action === "conclude" && (props as any).verdict) {
-      setVerdict((props as any).verdict);
+      return;
+    }
+
+    // Try to extract a verdict
+    const v = extractVerdict(props);
+    if (v) {
+      setVerdict(v);
+      return;
     }
   }, [props]);
 
-  // ── State change handler ───────────────────────────────────
+  // ── Handlers ─────────────────────────────────────────────────
   const handleStateChange = useCallback((key: string, value: any) => {
     setWidgetState((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  // ── Dismiss handler ────────────────────────────────────────
   const handleDismiss = useCallback(
     (id: string, title: string) => {
       setWidgetState((prev) => ({ ...prev, [`dismissed.${id}`]: true }));
@@ -113,14 +152,11 @@ const ForgeBoard: React.FC = () => {
         if (!prev) return prev;
         return { ...prev, layout: removeByIds(prev.layout, [id]) };
       });
-      try {
-        sendFollowUpMessage?.(`I dismissed "${title}" from my analysis. How does this change things?`);
-      } catch {}
+      try { sendFollowUpMessage?.(`I dismissed "${title}" from my analysis. How does this change things?`); } catch {}
     },
     [sendFollowUpMessage]
   );
 
-  // ── Tool call handler (dynamic) ────────────────────────────
   const handleCallTool = useCallback(
     (toolName: string, args: any) => {
       try {
@@ -143,17 +179,11 @@ const ForgeBoard: React.FC = () => {
     [callForgeUpdate, callForgeConclude, widgetState]
   );
 
-  // ── Handle follow-up message ───────────────────────────────
   const handleSendFollowUp = useCallback(
-    (msg: string) => {
-      try {
-        sendFollowUpMessage?.(msg);
-      } catch {}
-    },
+    (msg: string) => { try { sendFollowUpMessage?.(msg); } catch {} },
     [sendFollowUpMessage]
   );
 
-  // ── Handle footer "What am I missing?" ─────────────────────
   const handleMissingInput = useCallback(
     (text: string) => {
       if (!spec) return;
@@ -161,24 +191,15 @@ const ForgeBoard: React.FC = () => {
         callForgeUpdate({
           operation: "add",
           components: [
-            {
-              type: "card",
-              id: `user-${Date.now()}`,
-              title: text,
-              dismissible: true,
-              accentColor: "#667eea",
-            },
+            { type: "card", id: `user-${Date.now()}`, title: text, dismissible: true, accentColor: "#667eea" },
           ],
           commentary: `User added: "${text}"`,
         });
-      } catch (e) {
-        console.warn("[Forge] Missing input call error:", e);
-      }
+      } catch {}
     },
     [spec, callForgeUpdate]
   );
 
-  // ── Handle action buttons ──────────────────────────────────
   const handleAction = useCallback(
     (action: any) => {
       if (action.action === "call_tool" && action.toolName) {
@@ -200,11 +221,40 @@ const ForgeBoard: React.FC = () => {
     [widgetState, handleCallTool, handleSendFollowUp]
   );
 
-  // ── Render ─────────────────────────────────────────────────
-  if (isPending || !spec) {
-    return <LoadingSpinner />;
+  // ── Render: Loading ────────────────────────────────────────
+  if (isPending) {
+    return <LoadingSpinner message="Building your workspace..." />;
   }
 
+  // ── Render: No spec yet — show debug info ──────────────────
+  if (!spec) {
+    return (
+      <div style={{ fontFamily: "system-ui, sans-serif", padding: 24, background: "#f8fafc", borderRadius: 16 }}>
+        <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b", marginBottom: 8 }}>
+          ⚡ Forge — Waiting for spec
+        </div>
+        <p style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
+          The widget loaded but no valid spec was detected in the props.
+        </p>
+        {debugInfo && (
+          <details>
+            <summary style={{ fontSize: 12, color: "#94a3b8", cursor: "pointer" }}>
+              Debug: Raw props received
+            </summary>
+            <pre style={{
+              fontSize: 11, color: "#475569", background: "#f1f5f9",
+              padding: 12, borderRadius: 8, overflow: "auto", maxHeight: 200,
+              marginTop: 8,
+            }}>
+              {debugInfo}
+            </pre>
+          </details>
+        )}
+      </div>
+    );
+  }
+
+  // ── Render: Full widget ────────────────────────────────────
   return (
     <div
       style={{
@@ -248,21 +298,24 @@ const ForgeBoard: React.FC = () => {
       </div>
 
       {/* Dynamic Layout */}
-      <SpecRenderer
-        nodes={spec.layout}
-        state={widgetState}
-        onStateChange={handleStateChange}
-        onDismiss={handleDismiss}
-        callTool={handleCallTool}
-        sendFollowUpMessage={handleSendFollowUp}
-      />
-
-      {/* Footer: "What am I missing?" */}
-      {spec.footer && (
-        <MissingInput
-          onSubmit={handleMissingInput}
-          isPending={isUpdating}
+      {spec.layout && spec.layout.length > 0 ? (
+        <SpecRenderer
+          nodes={spec.layout}
+          state={widgetState}
+          onStateChange={handleStateChange}
+          onDismiss={handleDismiss}
+          callTool={handleCallTool}
+          sendFollowUpMessage={handleSendFollowUp}
         />
+      ) : (
+        <p style={{ color: "#94a3b8", fontSize: 13, fontStyle: "italic", padding: 16, textAlign: "center" }}>
+          No layout components to display
+        </p>
+      )}
+
+      {/* Footer */}
+      {spec.footer && (
+        <MissingInput onSubmit={handleMissingInput} isPending={isUpdating} />
       )}
 
       {/* Action buttons */}
@@ -270,8 +323,7 @@ const ForgeBoard: React.FC = () => {
         <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
           {spec.actions.map((action, i) => {
             const isPrimary = action.variant === "primary";
-            const isActionPending =
-              action.toolName === "forge_conclude" ? isConcluding : isUpdating;
+            const isActionPending = action.toolName === "forge_conclude" ? isConcluding : isUpdating;
             return (
               <button
                 key={i}
@@ -303,7 +355,7 @@ const ForgeBoard: React.FC = () => {
         </div>
       )}
 
-      {/* Verdict panel */}
+      {/* Verdict */}
       {verdict && <VerdictPanel verdict={verdict} />}
     </div>
   );
