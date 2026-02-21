@@ -177,8 +177,9 @@ const ActivityLog: React.FC<{ entries: string[] }> = ({ entries }) => {
 const ForgeBoard: React.FC = () => {
   const { props, isPending, sendFollowUpMessage } = useWidget();
 
-  const { callTool: callForgeUpdate, isPending: isUpdating } = useCallTool("forge_update");
-  const { callTool: callForgeConclude, isPending: isConcluding } = useCallTool("forge_conclude");
+  const { callTool: callForgeUpdate, isPending: isUpdating } = useCallTool("forge_update") as any;
+  const { callTool: callForgeConclude, isPending: isConcluding } = useCallTool("forge_conclude") as any;
+  const { callTool: callForgeSave, isPending: isSaving } = useCallTool("forge_save") as any;
 
   const [spec, setSpec] = useState<ForgeSpec | null>(null);
   const [widgetState, setWidgetState] = useState<Record<string, any>>({});
@@ -186,7 +187,9 @@ const ForgeBoard: React.FC = () => {
   const [debugInfo, setDebugInfo] = useState<string>("");
   const [toast, setToast] = useState<{ message: string; visible: boolean }>({ message: "", visible: false });
   const [activityLog, setActivityLog] = useState<string[]>([]);
+  const [sessionId, setSessionId] = useState<string | null>(null);
   const prevTitle = useRef<string>("");
+  const interactionCount = useRef(0);
 
   const showToast = useCallback((message: string) => {
     setToast({ message, visible: true });
@@ -197,6 +200,30 @@ const ForgeBoard: React.FC = () => {
     setActivityLog((prev) => [...prev, entry]);
   }, []);
 
+  // ── Auto-save: debounced save after meaningful interactions ──
+  const triggerAutoSave = useCallback(() => {
+    if (!spec) return;
+    interactionCount.current += 1;
+    // Auto-save every 5 meaningful interactions
+    if (interactionCount.current % 5 === 0) {
+      callForgeSave({
+        session_id: sessionId || undefined,
+        title: spec.title,
+        spec,
+        widget_state: widgetState,
+        verdict: verdict || undefined,
+      }, {
+        onSuccess: (result: any) => {
+          const data = result?.structuredContent || result;
+          if (data?.session_id && !sessionId) {
+            setSessionId(data.session_id);
+          }
+          addActivity("Auto-saved");
+        },
+      });
+    }
+  }, [spec, sessionId, widgetState, verdict, callForgeSave, addActivity]);
+
   // ── Process incoming props ──────────────────────────────────
   useEffect(() => {
     if (!props) return;
@@ -205,12 +232,28 @@ const ForgeBoard: React.FC = () => {
       setDebugInfo(JSON.stringify(props, null, 2).slice(0, 500));
     } catch { setDebugInfo("(could not serialize props)"); }
 
+    // Check for restored session data
+    if (props._restored && props._sessionId) {
+      setSessionId(props._sessionId as string);
+      if (props._restoredState) {
+        setWidgetState(props._restoredState as Record<string, any>);
+      }
+      if (props._restoredVerdict) {
+        setVerdict(props._restoredVerdict as Verdict);
+      }
+      addActivity("Restored from saved session");
+      showToast("Session restored");
+    }
+
     const incomingSpec = extractSpec(props);
     if (incomingSpec) {
       if (incomingSpec.title !== prevTitle.current) {
-        setWidgetState({});
-        setVerdict(null);
-        setActivityLog([]);
+        if (!props._restored) {
+          setWidgetState({});
+          setVerdict(null);
+          setActivityLog([]);
+          setSessionId(null);
+        }
       }
       prevTitle.current = incomingSpec.title ?? "";
       setSpec(incomingSpec);
@@ -249,7 +292,8 @@ const ForgeBoard: React.FC = () => {
   // ── Handlers ─────────────────────────────────────────────────
   const handleStateChange = useCallback((key: string, value: any) => {
     setWidgetState((prev) => ({ ...prev, [key]: value }));
-  }, []);
+    triggerAutoSave();
+  }, [triggerAutoSave]);
 
   const handleDismiss = useCallback(
     (id: string, title: string) => {
@@ -260,8 +304,9 @@ const ForgeBoard: React.FC = () => {
       });
       addActivity(`Dismissed "${title}"`);
       showToast(`Removed "${title}"`);
+      triggerAutoSave();
     },
-    [addActivity, showToast]
+    [addActivity, showToast, triggerAutoSave]
   );
 
   const handleCallTool = useCallback(
@@ -309,6 +354,52 @@ const ForgeBoard: React.FC = () => {
     },
     [spec, callForgeUpdate, addActivity, showToast]
   );
+
+  // Save progress to Firebase + chat context
+  const handleSaveProgress = useCallback(() => {
+    if (!spec) return;
+    const summary = formatStateForAI(widgetState, spec.title);
+    sendFollowUpMessage?.(summary);
+    callForgeSave({
+      session_id: sessionId || undefined,
+      title: spec.title,
+      spec,
+      widget_state: widgetState,
+      verdict: verdict || undefined,
+    }, {
+      onSuccess: (result: any) => {
+        const data = result?.structuredContent || result;
+        if (data?.session_id && !sessionId) {
+          setSessionId(data.session_id);
+        }
+        showToast("Saved!");
+        addActivity("Progress saved");
+      },
+      onError: () => {
+        showToast("Save failed");
+      },
+    });
+  }, [spec, widgetState, verdict, sessionId, sendFollowUpMessage, callForgeSave, showToast, addActivity]);
+
+  // Ask AI to refine workspace based on current inputs
+  const handleAskRefine = useCallback(() => {
+    if (!spec || !sendFollowUpMessage) return;
+    const stateContext = formatStateForAI(widgetState, spec.title);
+    sendFollowUpMessage(
+      `Based on my current inputs, please refine and improve this workspace. Add missing considerations, adjust the layout, or suggest better analysis angles.\n\n${stateContext}`
+    );
+    addActivity("Asked AI to refine");
+    showToast("Refining...");
+  }, [spec, widgetState, sendFollowUpMessage, addActivity, showToast]);
+
+  // Load previous sessions
+  const handleLoadSessions = useCallback(() => {
+    if (!sendFollowUpMessage) return;
+    sendFollowUpMessage(
+      "Show me my saved Forge sessions so I can resume one. Use forge_list_sessions to get the list, then let me pick which to load with forge_load."
+    );
+    addActivity("Requested saved sessions");
+  }, [sendFollowUpMessage, addActivity]);
 
   // Action buttons — the ONLY place that sends comprehensive state to AI
   const handleAction = useCallback(
@@ -358,6 +449,19 @@ const ForgeBoard: React.FC = () => {
         <p style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
           The widget loaded but no valid spec was detected in the props.
         </p>
+        {/* Quick actions when no spec */}
+        <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+          <button
+            onClick={handleLoadSessions}
+            style={{
+              padding: "8px 16px", borderRadius: 8, border: "1px solid #e2e8f0",
+              background: "#ffffff", color: "#475569", fontSize: 13, fontWeight: 600,
+              cursor: "pointer", fontFamily: "system-ui, sans-serif",
+            }}
+          >
+            Load Saved Session
+          </button>
+        </div>
         {debugInfo && (
           <details>
             <summary style={{ fontSize: 12, color: "#94a3b8", cursor: "pointer" }}>
@@ -376,6 +480,8 @@ const ForgeBoard: React.FC = () => {
     );
   }
 
+  const hasState = Object.keys(widgetState).length > 0;
+
   // ── Render: Full widget ────────────────────────────────────
   return (
     <div
@@ -391,9 +497,17 @@ const ForgeBoard: React.FC = () => {
       <div style={{ marginBottom: 20 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
           {spec.icon && <span style={{ fontSize: 20 }}>{spec.icon}</span>}
-          <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1e293b", margin: 0 }}>
+          <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1e293b", margin: 0, flex: 1 }}>
             {spec.title}
           </h2>
+          {sessionId && (
+            <span style={{
+              fontSize: 10, color: "#22c55e", background: "#f0fdf4",
+              padding: "2px 8px", borderRadius: 12, fontWeight: 600,
+            }}>
+              Synced
+            </span>
+          )}
         </div>
         {spec.badge && (
           <div
@@ -450,9 +564,52 @@ const ForgeBoard: React.FC = () => {
         </div>
       )}
 
+      {/* Utility bar: Save / Refine / Load */}
+      <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+        {hasState && (
+          <button
+            onClick={handleSaveProgress}
+            disabled={isSaving}
+            style={{
+              padding: "10px 16px", borderRadius: 10, border: "none",
+              background: isSaving ? "#e2e8f0" : "#f1f5f9",
+              color: "#475569", fontSize: 13, fontWeight: 600,
+              cursor: isSaving ? "not-allowed" : "pointer",
+              fontFamily: "system-ui, sans-serif", transition: "all 0.2s",
+            }}
+          >
+            {isSaving ? "Saving..." : "Save Progress"}
+          </button>
+        )}
+        {hasState && (
+          <button
+            onClick={handleAskRefine}
+            style={{
+              padding: "10px 16px", borderRadius: 10,
+              border: "1px solid #e2e8f0", background: "#ffffff",
+              color: "#667eea", fontSize: 13, fontWeight: 600,
+              cursor: "pointer", fontFamily: "system-ui, sans-serif",
+            }}
+          >
+            Refine with AI
+          </button>
+        )}
+        <button
+          onClick={handleLoadSessions}
+          style={{
+            padding: "10px 16px", borderRadius: 10,
+            border: "1px solid #e2e8f0", background: "#ffffff",
+            color: "#94a3b8", fontSize: 12, fontWeight: 600,
+            cursor: "pointer", fontFamily: "system-ui, sans-serif",
+          }}
+        >
+          Load Session
+        </button>
+      </div>
+
       {/* Action buttons — these are the ONLY things that talk to the AI */}
       {spec.actions && spec.actions.length > 0 && (
-        <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+        <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
           {spec.actions.map((action, i) => {
             const isPrimary = action.variant === "primary";
             const isActionPending = action.toolName === "forge_conclude" ? isConcluding : isUpdating;
