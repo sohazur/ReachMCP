@@ -53,7 +53,6 @@ function patchByIds(
   });
 }
 
-// Try to extract a ForgeSpec from whatever shape the props might be
 function tryParse(val: any): any {
   if (typeof val !== "string") return val;
   try { return JSON.parse(val); } catch { return val; }
@@ -61,25 +60,15 @@ function tryParse(val: any): any {
 
 function extractSpec(raw: any): ForgeSpec | null {
   if (!raw) return null;
-
-  // If raw itself is a string, parse it
   const parsed = tryParse(raw);
   if (parsed !== raw) return extractSpec(parsed);
-
-  // Direct spec: { title, layout, ... }
   if (raw.title && raw.layout) return raw as ForgeSpec;
-
-  // spec field might be a string that needs parsing
   const specVal = tryParse(raw.spec);
-
-  // Wrapped: { spec: { title, layout, ... } }
   if (specVal && specVal.title && specVal.layout) return specVal as ForgeSpec;
-  // Double-wrapped: { spec: { spec: { ... } } }
   if (specVal && specVal.spec) {
     const inner = tryParse(specVal.spec);
     if (inner && inner.title && inner.layout) return inner as ForgeSpec;
   }
-  // Action-wrapped: { action: "render", spec: { ... } }
   if (raw.action === "render" && specVal) {
     if (specVal.title && specVal.layout) return specVal as ForgeSpec;
   }
@@ -101,27 +90,88 @@ function extractVerdict(raw: any): Verdict | null {
   return null;
 }
 
-// Format widget state into a human-readable summary for the AI
-function formatStateForChat(state: Record<string, any>, specTitle: string): string {
-  const entries = Object.entries(state).filter(([k]) => !k.startsWith("dismissed."));
-  if (entries.length === 0) return `[Forge workspace: "${specTitle}"] No user input yet.`;
+// ── Format state into a clean summary for the AI ──────────────
+function formatStateForAI(state: Record<string, any>, specTitle: string): string {
+  const entries = Object.entries(state).filter(([k, v]) => !k.startsWith("dismissed.") && v !== "" && v !== undefined);
+  if (entries.length === 0) return `Workspace: "${specTitle}" — no user input yet.`;
 
   const lines = entries.map(([k, v]) => {
-    if (typeof v === "boolean") return `  - ${k}: ${v ? "Yes" : "No"}`;
-    if (typeof v === "number") return `  - ${k}: ${v}`;
-    return `  - ${k}: ${v}`;
+    const label = k.replace(/\./g, " > ").replace(/_/g, " ");
+    if (typeof v === "boolean") return `  ${label}: ${v ? "Yes" : "No"}`;
+    if (typeof v === "number") return `  ${label}: ${v}`;
+    return `  ${label}: ${v}`;
   });
 
   const dismissed = Object.entries(state)
     .filter(([k, v]) => k.startsWith("dismissed.") && v)
     .map(([k]) => k.replace("dismissed.", ""));
 
-  let summary = `[Forge workspace: "${specTitle}"]\nUser inputs:\n${lines.join("\n")}`;
+  let summary = `Here is everything the user has filled in for "${specTitle}":\n${lines.join("\n")}`;
   if (dismissed.length > 0) {
-    summary += `\nDismissed: ${dismissed.join(", ")}`;
+    summary += `\nDismissed items: ${dismissed.join(", ")}`;
   }
   return summary;
 }
+
+// ── In-widget toast notification ──────────────────────────────
+const Toast: React.FC<{ message: string; visible: boolean }> = ({ message, visible }) => (
+  <div
+    style={{
+      position: "fixed",
+      bottom: 16,
+      left: "50%",
+      transform: `translateX(-50%) translateY(${visible ? 0 : 20}px)`,
+      background: "#1e293b",
+      color: "#ffffff",
+      padding: "10px 20px",
+      borderRadius: 12,
+      fontSize: 13,
+      fontWeight: 600,
+      fontFamily: "system-ui, sans-serif",
+      boxShadow: "0 4px 12px rgba(0,0,0,0.15)",
+      opacity: visible ? 1 : 0,
+      transition: "all 0.3s ease",
+      pointerEvents: "none",
+      zIndex: 1000,
+    }}
+  >
+    {message}
+  </div>
+);
+
+// ── Activity log — shows micro-interaction results in-widget ──
+const ActivityLog: React.FC<{ entries: string[] }> = ({ entries }) => {
+  if (entries.length === 0) return null;
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: 12,
+        background: "#f0f9ff",
+        borderRadius: 10,
+        border: "1px solid #bae6fd",
+      }}
+    >
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#0369a1", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
+        Activity
+      </div>
+      {entries.slice(-5).map((entry, i) => (
+        <div
+          key={i}
+          style={{
+            fontSize: 12,
+            color: "#475569",
+            padding: "3px 0",
+            borderBottom: i < entries.slice(-5).length - 1 ? "1px solid #e0f2fe" : "none",
+            fontFamily: "system-ui, sans-serif",
+          }}
+        >
+          {entry}
+        </div>
+      ))}
+    </div>
+  );
+};
 
 // ── Main Component ─────────────────────────────────────────────
 const ForgeBoard: React.FC = () => {
@@ -134,31 +184,39 @@ const ForgeBoard: React.FC = () => {
   const [widgetState, setWidgetState] = useState<Record<string, any>>({});
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [debugInfo, setDebugInfo] = useState<string>("");
-  const [saveFlash, setSaveFlash] = useState(false);
+  const [toast, setToast] = useState<{ message: string; visible: boolean }>({ message: "", visible: false });
+  const [activityLog, setActivityLog] = useState<string[]>([]);
   const prevTitle = useRef<string>("");
 
-  // ── Process incoming props — flexible shape detection ───────
+  const showToast = useCallback((message: string) => {
+    setToast({ message, visible: true });
+    setTimeout(() => setToast((t) => ({ ...t, visible: false })), 2500);
+  }, []);
+
+  const addActivity = useCallback((entry: string) => {
+    setActivityLog((prev) => [...prev, entry]);
+  }, []);
+
+  // ── Process incoming props ──────────────────────────────────
   useEffect(() => {
     if (!props) return;
 
-    // Log for debugging
     try {
       setDebugInfo(JSON.stringify(props, null, 2).slice(0, 500));
     } catch { setDebugInfo("(could not serialize props)"); }
 
-    // Try to extract a spec (handles multiple wrapper shapes)
     const incomingSpec = extractSpec(props);
     if (incomingSpec) {
       if (incomingSpec.title !== prevTitle.current) {
         setWidgetState({});
         setVerdict(null);
+        setActivityLog([]);
       }
       prevTitle.current = incomingSpec.title ?? "";
       setSpec(incomingSpec);
       return;
     }
 
-    // Try to extract an update
     const update = extractUpdate(props);
     if (update && spec) {
       setSpec((prev) => {
@@ -166,20 +224,24 @@ const ForgeBoard: React.FC = () => {
         const newSpec = { ...prev, layout: [...prev.layout] };
         if (update.operation === "add" && update.components) {
           newSpec.layout = [...newSpec.layout, ...(update.components as LayoutNode[])];
+          addActivity(`Added ${(update.components as any[]).length} new item(s)`);
         } else if (update.operation === "remove" && update.ids) {
           newSpec.layout = removeByIds(newSpec.layout, update.ids);
+          addActivity(`Removed ${update.ids.length} item(s)`);
         } else if (update.operation === "patch" && update.patches) {
           newSpec.layout = patchByIds(newSpec.layout, update.patches);
+          addActivity(`Updated ${(update.patches as any[]).length} item(s)`);
         }
         return newSpec;
       });
+      showToast("Workspace updated");
       return;
     }
 
-    // Try to extract a verdict
     const v = extractVerdict(props);
     if (v) {
       setVerdict(v);
+      addActivity("Analysis complete — verdict ready");
       return;
     }
   }, [props]);
@@ -196,9 +258,10 @@ const ForgeBoard: React.FC = () => {
         if (!prev) return prev;
         return { ...prev, layout: removeByIds(prev.layout, [id]) };
       });
-      try { sendFollowUpMessage?.(`I dismissed "${title}" from my analysis. How does this change things?`); } catch {}
+      addActivity(`Dismissed "${title}"`);
+      showToast(`Removed "${title}"`);
     },
-    [sendFollowUpMessage]
+    [addActivity, showToast]
   );
 
   const handleCallTool = useCallback(
@@ -207,7 +270,6 @@ const ForgeBoard: React.FC = () => {
         if (toolName === "forge_update") {
           callForgeUpdate(args);
         } else if (toolName === "forge_conclude") {
-          // Always include full widget state when concluding
           callForgeConclude({
             winner: "",
             confidence: 50,
@@ -229,12 +291,11 @@ const ForgeBoard: React.FC = () => {
     [sendFollowUpMessage]
   );
 
+  // Footer "What am I missing?" — adds card in-widget + notifies AI
   const handleMissingInput = useCallback(
     (text: string) => {
       if (!spec) return;
       try {
-        // Send as follow-up so AI has context, AND add as card
-        sendFollowUpMessage?.(`I'm adding "${text}" to my workspace. Please factor this in.`);
         callForgeUpdate({
           operation: "add",
           components: [
@@ -242,24 +303,21 @@ const ForgeBoard: React.FC = () => {
           ],
           commentary: `User added: "${text}"`,
         });
+        addActivity(`Added: "${text}"`);
+        showToast("Added to workspace");
       } catch {}
     },
-    [spec, callForgeUpdate, sendFollowUpMessage]
+    [spec, callForgeUpdate, addActivity, showToast]
   );
 
-  // Save all widget state to chat context
-  const handleSaveProgress = useCallback(() => {
-    if (!spec || !sendFollowUpMessage) return;
-    const summary = formatStateForChat(widgetState, spec.title);
-    sendFollowUpMessage(summary);
-    setSaveFlash(true);
-    setTimeout(() => setSaveFlash(false), 2000);
-  }, [spec, widgetState, sendFollowUpMessage]);
-
+  // Action buttons — the ONLY place that sends comprehensive state to AI
   const handleAction = useCallback(
     (action: any) => {
       if (action.action === "call_tool" && action.toolName) {
-        const args: Record<string, any> = {};
+        const stateContext = formatStateForAI(widgetState, spec?.title ?? "");
+        const args: Record<string, any> = { _userContext: stateContext };
+
+        // Collect specific state keys if requested
         if (action.toolArgsFromState) {
           for (const prefix of action.toolArgsFromState) {
             for (const [k, v] of Object.entries(widgetState)) {
@@ -269,18 +327,20 @@ const ForgeBoard: React.FC = () => {
             }
           }
         }
-        // Always include full state summary for tool calls
         args._allState = widgetState;
         handleCallTool(action.toolName, args);
+        addActivity(`Requested: ${action.label}`);
+        showToast("Processing...");
       } else if (action.action === "follow_up" && action.message) {
-        // Include state context in follow-up messages
-        const stateContext = Object.keys(widgetState).length > 0
-          ? `\n\n${formatStateForChat(widgetState, spec?.title ?? "")}`
-          : "";
-        handleSendFollowUp(action.message + stateContext);
+        // Send the action message WITH full accumulated state context
+        const stateContext = formatStateForAI(widgetState, spec?.title ?? "");
+        const fullMessage = `${action.message}\n\n${stateContext}\n\nPlease analyze based on all my inputs above and respond. If you can update the workspace with results, use forge_update to add them. Otherwise respond in chat.`;
+        handleSendFollowUp(fullMessage);
+        addActivity(`Requested: ${action.label}`);
+        showToast("Sent to AI — results will appear here or in chat");
       }
     },
-    [widgetState, handleCallTool, handleSendFollowUp, spec]
+    [widgetState, handleCallTool, handleSendFollowUp, spec, addActivity, showToast]
   );
 
   // ── Render: Loading ────────────────────────────────────────
@@ -288,7 +348,7 @@ const ForgeBoard: React.FC = () => {
     return <LoadingSpinner message="Building your workspace..." />;
   }
 
-  // ── Render: No spec yet — show debug info ──────────────────
+  // ── Render: No spec yet ────────────────────────────────────
   if (!spec) {
     return (
       <div style={{ fontFamily: "system-ui, sans-serif", padding: 24, background: "#f8fafc", borderRadius: 16 }}>
@@ -316,8 +376,6 @@ const ForgeBoard: React.FC = () => {
     );
   }
 
-  const hasState = Object.keys(widgetState).length > 0;
-
   // ── Render: Full widget ────────────────────────────────────
   return (
     <div
@@ -326,6 +384,7 @@ const ForgeBoard: React.FC = () => {
         background: "#f8fafc",
         borderRadius: 16,
         padding: 24,
+        position: "relative",
       }}
     >
       {/* Header */}
@@ -377,9 +436,12 @@ const ForgeBoard: React.FC = () => {
         </p>
       )}
 
+      {/* Activity log — shows micro-interaction results IN the widget */}
+      <ActivityLog entries={activityLog} />
+
       {/* Footer */}
       {spec.footer && (
-        <div style={{ marginTop: 16 }}>
+        <div style={{ marginTop: 12 }}>
           <MissingInput
             onSubmit={handleMissingInput}
             isPending={isUpdating}
@@ -388,65 +450,48 @@ const ForgeBoard: React.FC = () => {
         </div>
       )}
 
-      {/* Action buttons + Save Progress */}
-      <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
-        {/* Save Progress — always visible when there's state */}
-        {hasState && (
-          <button
-            onClick={handleSaveProgress}
-            style={{
-              padding: "12px 20px",
-              borderRadius: 12,
-              border: "none",
-              background: saveFlash ? "#22c55e" : "#f1f5f9",
-              color: saveFlash ? "#ffffff" : "#475569",
-              fontSize: 14,
-              fontWeight: 600,
-              cursor: "pointer",
-              fontFamily: "system-ui, sans-serif",
-              transition: "all 0.3s",
-            }}
-          >
-            {saveFlash ? "Saved to chat!" : "Save Progress"}
-          </button>
-        )}
-
-        {/* Spec-defined action buttons */}
-        {spec.actions && spec.actions.map((action, i) => {
-          const isPrimary = action.variant === "primary";
-          const isActionPending = action.toolName === "forge_conclude" ? isConcluding : isUpdating;
-          return (
-            <button
-              key={i}
-              onClick={() => handleAction(action)}
-              disabled={isActionPending}
-              style={{
-                flex: isPrimary ? 1 : undefined,
-                padding: "12px 20px",
-                borderRadius: 12,
-                border: "none",
-                background: isActionPending
-                  ? "#cbd5e1"
-                  : isPrimary
-                  ? "linear-gradient(135deg, #667eea, #764ba2)"
-                  : "#f1f5f9",
-                color: isPrimary ? "#ffffff" : "#475569",
-                fontSize: 15,
-                fontWeight: 700,
-                cursor: isActionPending ? "not-allowed" : "pointer",
-                fontFamily: "system-ui, sans-serif",
-                transition: "opacity 0.2s",
-              }}
-            >
-              {action.icon && <span style={{ marginRight: 6 }}>{action.icon}</span>}
-              {isActionPending ? "Working..." : action.label}
-            </button>
-          );
-        })}
-      </div>
+      {/* Action buttons — these are the ONLY things that talk to the AI */}
+      {spec.actions && spec.actions.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+          {spec.actions.map((action, i) => {
+            const isPrimary = action.variant === "primary";
+            const isActionPending = action.toolName === "forge_conclude" ? isConcluding : isUpdating;
+            return (
+              <button
+                key={i}
+                onClick={() => handleAction(action)}
+                disabled={isActionPending}
+                style={{
+                  flex: isPrimary ? 1 : undefined,
+                  padding: "12px 20px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: isActionPending
+                    ? "#cbd5e1"
+                    : isPrimary
+                    ? "linear-gradient(135deg, #667eea, #764ba2)"
+                    : "#f1f5f9",
+                  color: isPrimary ? "#ffffff" : "#475569",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  cursor: isActionPending ? "not-allowed" : "pointer",
+                  fontFamily: "system-ui, sans-serif",
+                  transition: "opacity 0.2s",
+                }}
+              >
+                {action.icon && <span style={{ marginRight: 6 }}>{action.icon}</span>}
+                {isActionPending ? "Working..." : action.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
 
       {/* Verdict */}
       {verdict && <VerdictPanel verdict={verdict} />}
+
+      {/* Toast notification */}
+      <Toast message={toast.message} visible={toast.visible} />
     </div>
   );
 };
