@@ -68,35 +68,35 @@ const ForgeBoard: React.FC = () => {
 
   // ── Process incoming props ─────────────────────────────────
   useEffect(() => {
-    if (!props || !props.action) return;
+    if (!props) return;
 
-    if (props.action === "render" && props.spec) {
-      // Reset state if it's a new problem (different title)
-      if (props.spec.title !== prevTitle.current) {
+    // Handle both direct spec and action-based props
+    const action = (props as any).action;
+    const incomingSpec = (props as any).spec;
+
+    if (action === "render" && incomingSpec) {
+      if (incomingSpec.title !== prevTitle.current) {
         setWidgetState({});
         setVerdict(null);
       }
-      prevTitle.current = props.spec.title;
-      setSpec(props.spec);
-    }
-
-    if (props.action === "update" && spec) {
+      prevTitle.current = incomingSpec.title ?? "";
+      setSpec(incomingSpec);
+    } else if (action === "update") {
       setSpec((prev) => {
         if (!prev) return prev;
         const newSpec = { ...prev, layout: [...prev.layout] };
-        if (props.operation === "add" && props.components) {
-          newSpec.layout = [...newSpec.layout, ...(props.components as LayoutNode[])];
-        } else if (props.operation === "remove" && props.ids) {
-          newSpec.layout = removeByIds(newSpec.layout, props.ids);
-        } else if (props.operation === "patch" && props.patches) {
-          newSpec.layout = patchByIds(newSpec.layout, props.patches as any);
+        const op = (props as any).operation;
+        if (op === "add" && (props as any).components) {
+          newSpec.layout = [...newSpec.layout, ...((props as any).components as LayoutNode[])];
+        } else if (op === "remove" && (props as any).ids) {
+          newSpec.layout = removeByIds(newSpec.layout, (props as any).ids);
+        } else if (op === "patch" && (props as any).patches) {
+          newSpec.layout = patchByIds(newSpec.layout, (props as any).patches);
         }
         return newSpec;
       });
-    }
-
-    if (props.action === "conclude" && props.verdict) {
-      setVerdict(props.verdict);
+    } else if (action === "conclude" && (props as any).verdict) {
+      setVerdict((props as any).verdict);
     }
   }, [props]);
 
@@ -109,7 +109,6 @@ const ForgeBoard: React.FC = () => {
   const handleDismiss = useCallback(
     (id: string, title: string) => {
       setWidgetState((prev) => ({ ...prev, [`dismissed.${id}`]: true }));
-      // Also remove from spec layout
       setSpec((prev) => {
         if (!prev) return prev;
         return { ...prev, layout: removeByIds(prev.layout, [id]) };
@@ -124,18 +123,21 @@ const ForgeBoard: React.FC = () => {
   // ── Tool call handler (dynamic) ────────────────────────────
   const handleCallTool = useCallback(
     (toolName: string, args: any) => {
-      if (toolName === "forge_update") {
-        callForgeUpdate(args);
-      } else if (toolName === "forge_conclude") {
-        // Pass widget state so AI can see user preferences
-        callForgeConclude({
-          winner: "",
-          confidence: 50,
-          reasoning: "",
-          next_steps: [],
-          ...args,
-          _widgetState: widgetState,
-        });
+      try {
+        if (toolName === "forge_update") {
+          callForgeUpdate(args);
+        } else if (toolName === "forge_conclude") {
+          callForgeConclude({
+            winner: "",
+            confidence: 50,
+            reasoning: "",
+            next_steps: [],
+            ...args,
+            _widgetState: widgetState,
+          });
+        }
+      } catch (e) {
+        console.warn("[Forge] callTool error:", e);
       }
     },
     [callForgeUpdate, callForgeConclude, widgetState]
@@ -155,8 +157,7 @@ const ForgeBoard: React.FC = () => {
   const handleMissingInput = useCallback(
     (text: string) => {
       if (!spec) return;
-      const footer = spec.footer;
-      if (footer?.action === "call_tool" && footer.toolName) {
+      try {
         callForgeUpdate({
           operation: "add",
           components: [
@@ -170,16 +171,11 @@ const ForgeBoard: React.FC = () => {
           ],
           commentary: `User added: "${text}"`,
         });
-      } else if (footer?.action === "follow_up") {
-        const msg = footer.message
-          ? footer.message.replace("{{value}}", text)
-          : `Consider this factor I think is missing: "${text}"`;
-        try {
-          sendFollowUpMessage?.(msg);
-        } catch {}
+      } catch (e) {
+        console.warn("[Forge] Missing input call error:", e);
       }
     },
-    [spec, callForgeUpdate, sendFollowUpMessage]
+    [spec, callForgeUpdate]
   );
 
   // ── Handle action buttons ──────────────────────────────────
@@ -206,11 +202,7 @@ const ForgeBoard: React.FC = () => {
 
   // ── Render ─────────────────────────────────────────────────
   if (isPending || !spec) {
-    return (
-      <McpUseProvider autoSize>
-        <LoadingSpinner />
-      </McpUseProvider>
-    );
+    return <LoadingSpinner />;
   }
 
   return (

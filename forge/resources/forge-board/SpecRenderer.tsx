@@ -1,15 +1,47 @@
-import React, { useState } from "react";
-import type { LayoutNode, ComponentNode, RenderProps } from "./types";
+import React, { useState, Component, type ErrorInfo, type ReactNode } from "react";
+import type { LayoutNode, ComponentNode } from "./types";
 import { isContainerNode } from "./types";
 import { componentRegistry } from "./componentRegistry";
 
-interface SpecRendererProps {
+export interface SpecRendererProps {
   nodes: LayoutNode[];
   state: Record<string, any>;
   onStateChange: (key: string, value: any) => void;
   onDismiss: (id: string, title: string) => void;
-  callTool: (name: string, args: any) => void;
-  sendFollowUpMessage: (msg: string) => void;
+  callTool?: (name: string, args: any) => void;
+  sendFollowUpMessage?: (msg: string) => void;
+}
+
+// ── Error boundary for individual components ───────────────────
+class ComponentErrorBoundary extends Component<
+  { fallback: string; children: ReactNode },
+  { hasError: boolean }
+> {
+  state = { hasError: false };
+  static getDerivedStateFromError() {
+    return { hasError: true };
+  }
+  componentDidCatch(error: Error, info: ErrorInfo) {
+    console.warn("[Forge] Component render error:", error.message, info.componentStack);
+  }
+  render() {
+    if (this.state.hasError) {
+      return (
+        <div
+          style={{
+            padding: 8,
+            fontSize: 12,
+            color: "#94a3b8",
+            fontStyle: "italic",
+            fontFamily: "system-ui, sans-serif",
+          }}
+        >
+          ⚠ Could not render: {this.props.fallback}
+        </div>
+      );
+    }
+    return this.props.children;
+  }
 }
 
 function renderComponent(
@@ -17,18 +49,30 @@ function renderComponent(
   index: number,
   props: Omit<SpecRendererProps, "nodes">
 ): React.ReactNode {
+  if (!node || !node.type) return null;
   const Component = componentRegistry[node.type];
-  if (!Component) return null;
+  if (!Component) {
+    return (
+      <div
+        key={`unknown-${index}`}
+        style={{ padding: 4, fontSize: 11, color: "#94a3b8", fontFamily: "system-ui" }}
+      >
+        Unknown component: {node.type}
+      </div>
+    );
+  }
+  const key = (node as any).id ?? `${node.type}-${index}`;
   return (
-    <Component
-      key={(node as any).id ?? `${node.type}-${index}`}
-      node={node}
-      state={props.state}
-      onStateChange={props.onStateChange}
-      onDismiss={props.onDismiss}
-      callTool={props.callTool}
-      sendFollowUpMessage={props.sendFollowUpMessage}
-    />
+    <ComponentErrorBoundary key={key} fallback={`${node.type} component`}>
+      <Component
+        node={node}
+        state={props.state}
+        onStateChange={props.onStateChange}
+        onDismiss={props.onDismiss}
+        callTool={props.callTool}
+        sendFollowUpMessage={props.sendFollowUpMessage}
+      />
+    </ComponentErrorBoundary>
   );
 }
 
@@ -83,9 +127,15 @@ export const SpecRenderer: React.FC<SpecRendererProps> = ({
 }) => {
   const renderProps = { state, onStateChange, onDismiss, callTool, sendFollowUpMessage };
 
+  if (!nodes || !Array.isArray(nodes)) {
+    return null;
+  }
+
   return (
     <>
       {nodes.map((node, i) => {
+        if (!node || !node.type) return null;
+
         if (isContainerNode(node)) {
           const gap = node.gap ?? 16;
           const children = node.children ?? [];
