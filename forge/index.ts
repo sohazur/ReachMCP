@@ -4,173 +4,182 @@ import { z } from "zod";
 const server = new MCPServer({
   name: "forge",
   title: "Forge",
-  version: "1.0.0",
-  description: "The last MCP App — AI picks the right decision tool for any problem",
+  version: "2.0.0",
+  description:
+    "The last MCP App — AI generates the right interactive tool for any problem",
   baseUrl: process.env.MCP_URL || "http://localhost:3000",
   favicon: "favicon.ico",
   websiteUrl: "https://mcp-use.com",
   icons: [
-    {
-      src: "icon.svg",
-      mimeType: "image/svg+xml",
-      sizes: ["512x512"],
-    },
+    { src: "icon.svg", mimeType: "image/svg+xml", sizes: ["512x512"] },
   ],
 });
 
-// ── Tool 1: analyze_problem ──────────────────────────────────────────
+// ── Tool 1: forge_view ─────────────────────────────────────────
 server.tool(
   {
-    name: "analyze_problem",
-    description:
-      "Analyze a decision or problem the user is facing. Choose the best visualization mode and generate structured data. Use 'comparison' mode when the user is choosing between 3+ concrete options (apartments, products, schools, candidates). Use 'argument_map' mode when the user faces a binary yes/no decision (quit job, move cities, buy vs rent). Use 'ranker' mode when the user needs to prioritize a list of items (features, tasks, goals).",
+    name: "forge_view",
+    description: `Generate an interactive visual workspace for any decision, analysis, brainstorm, or thinking task. You design the UI by outputting a JSON spec. The widget renders it dynamically.
+
+SPEC STRUCTURE:
+{
+  "title": "The question or task",
+  "subtitle": "Brief context (optional)",
+  "icon": "emoji (optional)",
+  "badge": "Mode label like 'Comparison Matrix' (optional)",
+  "layout": [ ...component nodes... ],
+  "actions": [ ...action buttons... ],
+  "footer": { "type": "missing_input", "placeholder": "What am I missing?", "action": "call_tool", "toolName": "forge_update" }
+}
+
+LAYOUT COMPONENT TYPES:
+
+Containers (hold children array, max 1 level deep):
+- { "type": "columns", "columns": 2, "gap": 16, "children": [...] }
+- { "type": "stack", "gap": 12, "children": [...] }
+- { "type": "tabs", "tabLabels": ["Tab1","Tab2"], "children": [...] } — children split evenly across tabs
+- { "type": "grid", "columns": 3, "gap": 12, "children": [...] }
+
+Content:
+- { "type": "heading", "text": "Section Title", "level": 2 }
+- { "type": "text", "text": "Paragraph content", "size": "sm"|"md"|"lg", "color": "#hex" }
+- { "type": "badge", "text": "Label", "color": "#hex" }
+- { "type": "divider" }
+
+Data display:
+- { "type": "card", "id": "unique", "title": "Card Title", "detail": "Expandable detail", "accentColor": "#hex", "dismissible": true }
+- { "type": "card_list", "stateKey": "items", "items": [{"id":"1","title":"Item","detail":"...","dismissible":true}] }
+- { "type": "table", "headers": [{"key":"col1","label":"Column 1","emoji":"📊"}], "rows": [{"col1":"value"}], "highlightKey": "col1" }
+
+Inputs (each has a stateKey for automatic state binding):
+- { "type": "slider", "stateKey": "weights.price", "value": 5, "min": 1, "max": 10, "label": "Price Weight", "lowLabel": "Low", "highLabel": "High", "accentColor": "#hex" }
+- { "type": "text_input", "stateKey": "notes", "placeholder": "Add a note..." }
+- { "type": "select", "stateKey": "filter", "options": [{"value":"all","label":"All"}], "value": "all" }
+- { "type": "toggle", "stateKey": "show_details", "label": "Show details", "value": false }
+- { "type": "button", "label": "Click me", "action": "call_tool"|"follow_up", "toolName": "forge_conclude", "variant": "primary"|"secondary"|"danger", "toolArgsFromState": ["weights"] }
+
+Visualization:
+- { "type": "progress_bar", "value": 75, "label": "Progress", "color": "#22c55e" }
+- { "type": "meter", "leftLabel": "Yes 60%", "rightLabel": "No 40%", "leftValue": 60, "rightValue": 40, "leftColor": "#22c55e", "rightColor": "#ef4444" }
+
+Composites (high-level patterns):
+- { "type": "scoreable_item", "id": "feat1", "title": "Feature", "description": "Details", "reasoning": "Why this score", "score": 80, "scoreMin": 0, "scoreMax": 100, "stateKey": "scores", "dismissible": true }
+- { "type": "argument_pair", "sideA": {"label":"For","color":"#22c55e","arguments":[{"id":"a1","title":"Point","detail":"...","strength":7}]}, "sideB": {"label":"Against","color":"#ef4444","arguments":[...]}, "stateKeyPrefix": "args", "showMeter": true, "dismissible": true }
+
+ACTIONS (bottom buttons):
+[{ "label": "🎯 Give me verdict", "action": "call_tool", "toolName": "forge_conclude", "variant": "primary", "toolArgsFromState": ["weights","scores"] }]
+
+STATE KEYS: Interactive components use stateKey. Sliders write state[stateKey] = value. Composites write state[stateKey + "." + id] = value. Action buttons can read state via toolArgsFromState.
+
+DESIGN GUIDELINES:
+- Pick the layout that best fits the problem (columns for comparisons, stack for lists, argument_pair for yes/no decisions)
+- Use scoreable_item for prioritization/ranking tasks
+- Use argument_pair for binary decisions with pros/cons
+- Use table + sliders for multi-option weighted comparisons
+- Use card_list for brainstorming/ideation
+- Always include a footer with "What am I missing?" and at least one action button
+- Use descriptive stateKeys so the AI can reference user preferences later`,
     schema: z.object({
-      mode: z.enum(["comparison", "argument_map", "ranker"]).describe("Which visualization to use"),
-      question: z.string().describe("The decision question"),
-      analysis: z.string().describe("2-3 sentence initial analysis"),
-      // Comparison mode
-      options: z
-        .array(z.object({ id: z.string(), name: z.string(), emoji: z.string() }))
-        .optional()
-        .describe("Options being compared (comparison mode, 3-5 items)"),
-      criteria: z
-        .array(
-          z.object({
-            id: z.string(),
-            name: z.string(),
-            weight: z.number().min(1).max(10),
-            description: z.string(),
-          })
-        )
-        .optional()
-        .describe("Comparison criteria (comparison mode, 4-6 items)"),
-      scores: z
-        .array(
-          z.object({
-            optionId: z.string(),
-            criteriaId: z.string(),
-            score: z.number().min(1).max(10),
-            note: z.string(),
-          })
-        )
-        .optional()
-        .describe("Score for each option on each criterion"),
-      // Argument map mode
-      side_a: z
-        .object({
-          label: z.string(),
-          arguments: z.array(
-            z.object({
-              id: z.string(),
-              title: z.string(),
-              detail: z.string(),
-              strength: z.number().min(1).max(10),
-            })
-          ),
-        })
-        .optional()
-        .describe("First side of the argument (argument_map mode)"),
-      side_b: z
-        .object({
-          label: z.string(),
-          arguments: z.array(
-            z.object({
-              id: z.string(),
-              title: z.string(),
-              detail: z.string(),
-              strength: z.number().min(1).max(10),
-            })
-          ),
-        })
-        .optional()
-        .describe("Second side of the argument (argument_map mode)"),
-      // Ranker mode
-      items: z
-        .array(
-          z.object({
-            id: z.string(),
-            title: z.string(),
-            description: z.string(),
-            score: z.number().min(0).max(100),
-            reasoning: z.string(),
-          })
-        )
-        .optional()
-        .describe("Items to rank, pre-sorted by score (ranker mode)"),
+      spec: z.any().describe("The UI spec JSON object"),
+      analysis: z
+        .string()
+        .describe("2-3 sentence text analysis for the conversation"),
     }),
     widget: {
       name: "forge-board",
-      invoking: "Analyzing your problem...",
-      invoked: "Analysis ready",
+      invoking: "Building your workspace...",
+      invoked: "Workspace ready",
     },
   },
-  async ({ mode, question, analysis, options, criteria, scores, side_a, side_b, items }) => {
+  async ({ spec, analysis }) => {
     return widget({
-      props: { mode, question, analysis, options, criteria, scores, side_a, side_b, items },
+      props: { action: "render", spec },
       output: text(analysis),
       message: analysis,
     });
   }
 );
 
-// ── Tool 2: add_factor ───────────────────────────────────────────────
+// ── Tool 2: forge_update ───────────────────────────────────────
 server.tool(
   {
-    name: "add_factor",
-    description:
-      "Add a new factor, argument, or criterion to the analysis. Called when the user identifies something the initial analysis missed.",
+    name: "forge_update",
+    description: `Update the current Forge workspace by adding, removing, or modifying components.
+
+Operations:
+- "add": Add new component nodes to the layout. Provide the components array.
+- "remove": Remove components by id. Provide the ids array.
+- "patch": Update specific fields of existing components by id. Provide patches array of {id, changes} objects.
+
+This is called when the user adds a new consideration via the "What am I missing?" input, or when you need to modify the current view.`,
     schema: z.object({
-      mode: z.enum(["comparison", "argument_map", "ranker"]).describe("Current visualization mode"),
-      factor_type: z
+      operation: z
+        .enum(["add", "remove", "patch"])
+        .describe("What kind of update"),
+      components: z
+        .any()
+        .optional()
+        .describe("For 'add': array of component nodes"),
+      ids: z
+        .array(z.string())
+        .optional()
+        .describe("For 'remove': component ids to remove"),
+      patches: z
+        .any()
+        .optional()
+        .describe("For 'patch': array of {id, changes}"),
+      commentary: z
         .string()
-        .describe("What kind of factor (criterion, argument_for_a, argument_for_b, item)"),
-      factor: z.object({
-        id: z.string(),
-        title: z.string(),
-        detail: z.string().optional(),
-        description: z.string().optional(),
-        score: z.number().optional(),
-        strength: z.number().optional(),
-        weight: z.number().optional(),
-      }).describe("The factor data"),
-      commentary: z.string().describe("Brief commentary about this addition"),
+        .describe("Brief commentary about this update"),
     }),
     widget: {
       name: "forge-board",
-      invoking: "Adding factor...",
-      invoked: "Factor added",
+      invoking: "Updating workspace...",
+      invoked: "Updated",
     },
   },
-  async ({ mode, factor_type, factor, commentary }) => {
+  async ({ operation, components, ids, patches, commentary }) => {
     return widget({
-      props: { addFactor: { mode, factor_type, factor } },
+      props: { action: "update", operation, components, ids, patches },
       output: text(commentary),
       message: commentary,
     });
   }
 );
 
-// ── Tool 3: generate_verdict ─────────────────────────────────────────
+// ── Tool 3: forge_conclude ─────────────────────────────────────
 server.tool(
   {
-    name: "generate_verdict",
-    description:
-      "Generate a personalized verdict/recommendation. Reference the specific factors the user weighted highest or interacted with most.",
+    name: "forge_conclude",
+    description: `Generate a conclusion, verdict, or summary for the current analysis. Reference the specific factors the user weighted highest or interacted with most. The widget displays this as a prominent verdict panel.`,
     schema: z.object({
-      winner: z.string().describe("The recommended option or side"),
-      confidence: z.number().min(1).max(100).describe("Confidence percentage"),
-      reasoning: z.string().describe("3-4 sentence personalized recommendation"),
-      next_steps: z.array(z.string()).describe("3 concrete next steps"),
+      winner: z
+        .string()
+        .describe("The recommended option, decision, or top priority"),
+      confidence: z
+        .number()
+        .min(1)
+        .max(100)
+        .describe("Confidence percentage"),
+      reasoning: z
+        .string()
+        .describe("3-4 sentence personalized recommendation"),
+      next_steps: z
+        .array(z.string())
+        .describe("3 concrete next steps"),
     }),
     widget: {
       name: "forge-board",
-      invoking: "Generating your verdict...",
-      invoked: "Verdict ready",
+      invoking: "Generating conclusion...",
+      invoked: "Conclusion ready",
     },
   },
   async ({ winner, confidence, reasoning, next_steps }) => {
     return widget({
-      props: { verdict: { winner, confidence, reasoning, next_steps } },
+      props: {
+        action: "conclude",
+        verdict: { winner, confidence, reasoning, next_steps },
+      },
       output: text(reasoning),
       message: reasoning,
     });
@@ -178,5 +187,5 @@ server.tool(
 );
 
 server.listen().then(() => {
-  console.log("Forge server running");
+  console.log("Forge v2 server running");
 });

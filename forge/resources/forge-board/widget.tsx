@@ -1,221 +1,216 @@
 import { McpUseProvider, useCallTool, useWidget, type WidgetMetadata } from "mcp-use/react";
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import "../styles.css";
-import type {
-  ForgeProps,
-  ComparisonOption,
-  Criterion,
-  Score,
-  Side,
-  RankerItem,
-  Verdict,
-} from "./types";
-import { propSchema } from "./types";
-import { ComparisonMatrix } from "./components/ComparisonMatrix";
-import { ArgumentMap } from "./components/ArgumentMap";
-import { PriorityRanker } from "./components/PriorityRanker";
-import { MissingInput } from "./components/MissingInput";
+import type { ForgeWidgetProps, ForgeSpec, Verdict, LayoutNode, ComponentNode } from "./types";
+import { propSchema, isContainerNode } from "./types";
+import { SpecRenderer } from "./SpecRenderer";
 import { VerdictPanel } from "./components/VerdictPanel";
+import { MissingInput } from "./components/MissingInput";
 import { LoadingSpinner } from "./components/LoadingSpinner";
 
 export const widgetMetadata: WidgetMetadata = {
-  description: "Adaptive decision engine that renders the right tool for any problem",
+  description: "Universal decision engine — AI generates the right interactive tool for any problem",
   props: propSchema,
   exposeAsTool: false,
 };
 
-const ForgeBoard: React.FC = () => {
-  const { props, isPending, sendFollowUpMessage } = useWidget<ForgeProps>();
-
-  const {
-    callTool: callAddFactor,
-    isPending: isAddingFactor,
-  } = useCallTool("add_factor");
-
-  const {
-    callTool: callGenerateVerdict,
-    isPending: isGeneratingVerdict,
-  } = useCallTool("generate_verdict");
-
-  // ── Local state ──────────────────────────────────────────────────
-  const [mode, setMode] = useState<"comparison" | "argument_map" | "ranker" | null>(null);
-  const [question, setQuestion] = useState("");
-  const [options, setOptions] = useState<ComparisonOption[]>([]);
-  const [criteria, setCriteria] = useState<Criterion[]>([]);
-  const [scores, setScores] = useState<Score[]>([]);
-  const [sideA, setSideA] = useState<Side>({ label: "", arguments: [] });
-  const [sideB, setSideB] = useState<Side>({ label: "", arguments: [] });
-  const [items, setItems] = useState<RankerItem[]>([]);
-  const [verdict, setVerdict] = useState<Verdict | null>(null);
-
-  // ── Sync props → local state ─────────────────────────────────────
-  useEffect(() => {
-    if (!props) return;
-
-    if (props.mode) {
-      setMode(props.mode);
-      setQuestion(props.question ?? "");
-      if (props.options) setOptions(props.options);
-      if (props.criteria) setCriteria(props.criteria);
-      if (props.scores) setScores(props.scores);
-      if (props.side_a) setSideA(props.side_a);
-      if (props.side_b) setSideB(props.side_b);
-      if (props.items) setItems(props.items);
-    }
-
-    if (props.addFactor) {
-      const { mode: fm, factor_type, factor } = props.addFactor;
-      if (fm === "comparison" && factor_type === "criterion") {
-        setCriteria((prev) => [...prev, { id: factor.id, name: factor.title, weight: factor.weight ?? 5, description: factor.detail ?? factor.description ?? "" }]);
-      } else if (fm === "argument_map") {
-        if (factor_type === "argument_for_a") {
-          setSideA((prev) => ({
-            ...prev,
-            arguments: [...prev.arguments, { id: factor.id, title: factor.title, detail: factor.detail ?? "", strength: factor.strength ?? 5 }],
-          }));
-        } else if (factor_type === "argument_for_b") {
-          setSideB((prev) => ({
-            ...prev,
-            arguments: [...prev.arguments, { id: factor.id, title: factor.title, detail: factor.detail ?? "", strength: factor.strength ?? 5 }],
-          }));
-        }
-      } else if (fm === "ranker") {
-        setItems((prev) => [...prev, { id: factor.id, title: factor.title, description: factor.description ?? "", score: factor.score ?? 50, reasoning: factor.detail ?? "" }]);
+// ── Helpers ────────────────────────────────────────────────────
+function removeByIds(nodes: LayoutNode[], ids: string[]): LayoutNode[] {
+  const idSet = new Set(ids);
+  return nodes
+    .filter((n) => !idSet.has((n as any).id))
+    .map((n) => {
+      if (isContainerNode(n) && n.children) {
+        return { ...n, children: n.children.filter((c) => !idSet.has((c as any).id)) as ComponentNode[] };
       }
+      return n;
+    });
+}
+
+function patchByIds(
+  nodes: LayoutNode[],
+  patches: Array<{ id: string; changes: Record<string, any> }>
+): LayoutNode[] {
+  const patchMap = new Map(patches.map((p) => [p.id, p.changes]));
+  return nodes.map((n) => {
+    const nodeId = (n as any).id;
+    if (nodeId && patchMap.has(nodeId)) {
+      return { ...n, ...patchMap.get(nodeId) } as LayoutNode;
+    }
+    if (isContainerNode(n) && n.children) {
+      return {
+        ...n,
+        children: n.children.map((c) => {
+          const cId = (c as any).id;
+          if (cId && patchMap.has(cId)) {
+            return { ...c, ...patchMap.get(cId) } as ComponentNode;
+          }
+          return c;
+        }),
+      };
+    }
+    return n;
+  });
+}
+
+// ── Main Component ─────────────────────────────────────────────
+const ForgeBoard: React.FC = () => {
+  const { props, isPending, sendFollowUpMessage } = useWidget<ForgeWidgetProps>();
+
+  const { callTool: callForgeUpdate, isPending: isUpdating } = useCallTool("forge_update");
+  const { callTool: callForgeConclude, isPending: isConcluding } = useCallTool("forge_conclude");
+
+  // Core state
+  const [spec, setSpec] = useState<ForgeSpec | null>(null);
+  const [widgetState, setWidgetState] = useState<Record<string, any>>({});
+  const [verdict, setVerdict] = useState<Verdict | null>(null);
+  const prevTitle = useRef<string>("");
+
+  // ── Process incoming props ─────────────────────────────────
+  useEffect(() => {
+    if (!props || !props.action) return;
+
+    if (props.action === "render" && props.spec) {
+      // Reset state if it's a new problem (different title)
+      if (props.spec.title !== prevTitle.current) {
+        setWidgetState({});
+        setVerdict(null);
+      }
+      prevTitle.current = props.spec.title;
+      setSpec(props.spec);
     }
 
-    if (props.verdict) {
+    if (props.action === "update" && spec) {
+      setSpec((prev) => {
+        if (!prev) return prev;
+        const newSpec = { ...prev, layout: [...prev.layout] };
+        if (props.operation === "add" && props.components) {
+          newSpec.layout = [...newSpec.layout, ...(props.components as LayoutNode[])];
+        } else if (props.operation === "remove" && props.ids) {
+          newSpec.layout = removeByIds(newSpec.layout, props.ids);
+        } else if (props.operation === "patch" && props.patches) {
+          newSpec.layout = patchByIds(newSpec.layout, props.patches as any);
+        }
+        return newSpec;
+      });
+    }
+
+    if (props.action === "conclude" && props.verdict) {
       setVerdict(props.verdict);
     }
   }, [props]);
 
-  // ── Handlers ─────────────────────────────────────────────────────
-  const handleWeightChange = useCallback(
-    (criterionId: string, newWeight: number) => {
-      setCriteria((prev) =>
-        prev.map((c) => (c.id === criterionId ? { ...c, weight: newWeight } : c))
-      );
-    },
-    []
-  );
-
-  const handleStrengthChange = useCallback(
-    (side: "a" | "b", argId: string, newStrength: number) => {
-      const setter = side === "a" ? setSideA : setSideB;
-      setter((prev) => ({
-        ...prev,
-        arguments: prev.arguments.map((a) =>
-          a.id === argId ? { ...a, strength: newStrength } : a
-        ),
-      }));
-    },
-    []
-  );
-
-  const handleDismissArg = useCallback(
-    (side: "a" | "b", argId: string) => {
-      const setter = side === "a" ? setSideA : setSideB;
-      let dismissedTitle = "";
-      setter((prev) => {
-        const arg = prev.arguments.find((a) => a.id === argId);
-        dismissedTitle = arg?.title ?? "";
-        return { ...prev, arguments: prev.arguments.filter((a) => a.id !== argId) };
-      });
-      try {
-        sendFollowUpMessage?.(`I just dismissed "${dismissedTitle}" from my analysis. The scores have shifted. What should I know?`);
-      } catch {}
-    },
-    [sendFollowUpMessage]
-  );
-
-  const handleScoreChange = useCallback((itemId: string, newScore: number) => {
-    setItems((prev) =>
-      prev.map((it) => (it.id === itemId ? { ...it, score: newScore } : it))
-    );
+  // ── State change handler ───────────────────────────────────
+  const handleStateChange = useCallback((key: string, value: any) => {
+    setWidgetState((prev) => ({ ...prev, [key]: value }));
   }, []);
 
-  const handleDismissItem = useCallback(
-    (itemId: string) => {
-      let dismissedTitle = "";
-      setItems((prev) => {
-        const item = prev.find((it) => it.id === itemId);
-        dismissedTitle = item?.title ?? "";
-        return prev.filter((it) => it.id !== itemId);
+  // ── Dismiss handler ────────────────────────────────────────
+  const handleDismiss = useCallback(
+    (id: string, title: string) => {
+      setWidgetState((prev) => ({ ...prev, [`dismissed.${id}`]: true }));
+      // Also remove from spec layout
+      setSpec((prev) => {
+        if (!prev) return prev;
+        return { ...prev, layout: removeByIds(prev.layout, [id]) };
       });
       try {
-        sendFollowUpMessage?.(`I just removed "${dismissedTitle}" from my priority list. How does this affect the ranking?`);
+        sendFollowUpMessage?.(`I dismissed "${title}" from my analysis. How does this change things?`);
       } catch {}
     },
     [sendFollowUpMessage]
   );
 
-  const handleAskMissing = useCallback(
-    (text: string) => {
-      if (!mode) return;
-      const factorType =
-        mode === "comparison"
-          ? "criterion"
-          : mode === "argument_map"
-          ? "argument_for_a"
-          : "item";
-      callAddFactor({
-        mode,
-        factor_type: factorType,
-        factor: { id: `user-${Date.now()}`, title: text, detail: text, description: text, score: 50, strength: 5, weight: 5 },
-        commentary: "",
-      });
+  // ── Tool call handler (dynamic) ────────────────────────────
+  const handleCallTool = useCallback(
+    (toolName: string, args: any) => {
+      if (toolName === "forge_update") {
+        callForgeUpdate(args);
+      } else if (toolName === "forge_conclude") {
+        // Pass widget state so AI can see user preferences
+        callForgeConclude({
+          winner: "",
+          confidence: 50,
+          reasoning: "",
+          next_steps: [],
+          ...args,
+          _widgetState: widgetState,
+        });
+      }
     },
-    [mode, callAddFactor]
+    [callForgeUpdate, callForgeConclude, widgetState]
   );
 
-  const handleVerdict = useCallback(() => {
-    let winner = "";
-    let confidence = 50;
+  // ── Handle follow-up message ───────────────────────────────
+  const handleSendFollowUp = useCallback(
+    (msg: string) => {
+      try {
+        sendFollowUpMessage?.(msg);
+      } catch {}
+    },
+    [sendFollowUpMessage]
+  );
 
-    if (mode === "comparison") {
-      const maxWeight = Math.max(...criteria.map((c) => c.weight), 1);
-      const totals: Record<string, number> = {};
-      for (const opt of options) {
-        let total = 0;
-        for (const crit of criteria) {
-          const s = scores.find((sc) => sc.optionId === opt.id && sc.criteriaId === crit.id);
-          if (s) total += s.score * (crit.weight / maxWeight);
-        }
-        totals[opt.id] = total;
+  // ── Handle footer "What am I missing?" ─────────────────────
+  const handleMissingInput = useCallback(
+    (text: string) => {
+      if (!spec) return;
+      const footer = spec.footer;
+      if (footer?.action === "call_tool" && footer.toolName) {
+        callForgeUpdate({
+          operation: "add",
+          components: [
+            {
+              type: "card",
+              id: `user-${Date.now()}`,
+              title: text,
+              dismissible: true,
+              accentColor: "#667eea",
+            },
+          ],
+          commentary: `User added: "${text}"`,
+        });
+      } else if (footer?.action === "follow_up") {
+        const msg = footer.message
+          ? footer.message.replace("{{value}}", text)
+          : `Consider this factor I think is missing: "${text}"`;
+        try {
+          sendFollowUpMessage?.(msg);
+        } catch {}
       }
-      const sorted = Object.entries(totals).sort((a, b) => b[1] - a[1]);
-      const best = options.find((o) => o.id === sorted[0]?.[0]);
-      winner = best?.name ?? "Unknown";
-      const topScore = sorted[0]?.[1] ?? 0;
-      const secondScore = sorted[1]?.[1] ?? 0;
-      confidence = Math.min(95, Math.round(50 + ((topScore - secondScore) / (topScore || 1)) * 50));
-    } else if (mode === "argument_map") {
-      const totalA = sideA.arguments.reduce((s, a) => s + a.strength, 0);
-      const totalB = sideB.arguments.reduce((s, a) => s + a.strength, 0);
-      winner = totalA >= totalB ? sideA.label : sideB.label;
-      const total = totalA + totalB || 1;
-      confidence = Math.round((Math.max(totalA, totalB) / total) * 100);
-    } else if (mode === "ranker") {
-      const sorted = [...items].sort((a, b) => b.score - a.score);
-      winner = sorted[0]?.title ?? "Unknown";
-      confidence = sorted[0]?.score ?? 50;
-    }
+    },
+    [spec, callForgeUpdate, sendFollowUpMessage]
+  );
 
-    callGenerateVerdict({
-      winner,
-      confidence,
-      reasoning: `Based on your analysis of "${question}", the recommendation is ${winner}.`,
-      next_steps: [
-        "Review the analysis one more time",
-        `Move forward with ${winner}`,
-        "Set a deadline for the final decision",
-      ],
-    });
-  }, [mode, question, criteria, options, scores, sideA, sideB, items, callGenerateVerdict]);
+  // ── Handle action buttons ──────────────────────────────────
+  const handleAction = useCallback(
+    (action: any) => {
+      if (action.action === "call_tool" && action.toolName) {
+        const args: Record<string, any> = {};
+        if (action.toolArgsFromState) {
+          for (const prefix of action.toolArgsFromState) {
+            for (const [k, v] of Object.entries(widgetState)) {
+              if (k === prefix || k.startsWith(prefix + ".")) {
+                args[k] = v;
+              }
+            }
+          }
+        }
+        handleCallTool(action.toolName, args);
+      } else if (action.action === "follow_up" && action.message) {
+        handleSendFollowUp(action.message);
+      }
+    },
+    [widgetState, handleCallTool, handleSendFollowUp]
+  );
 
-  // ── Render ───────────────────────────────────────────────────────
-  if (isPending || !mode) {
-    return <LoadingSpinner />;
+  // ── Render ─────────────────────────────────────────────────
+  if (isPending || !spec) {
+    return (
+      <McpUseProvider autoSize>
+        <LoadingSpinner />
+      </McpUseProvider>
+    );
   }
 
   return (
@@ -229,95 +224,94 @@ const ForgeBoard: React.FC = () => {
     >
       {/* Header */}
       <div style={{ marginBottom: 20 }}>
-        <div
-          style={{
-            display: "flex",
-            alignItems: "center",
-            gap: 8,
-            marginBottom: 4,
-          }}
-        >
-          <span style={{ fontSize: 20 }}>
-            {mode === "comparison" ? "📊" : mode === "argument_map" ? "⚖️" : "📋"}
-          </span>
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+          {spec.icon && <span style={{ fontSize: 20 }}>{spec.icon}</span>}
           <h2 style={{ fontSize: 18, fontWeight: 700, color: "#1e293b", margin: 0 }}>
-            {question}
+            {spec.title}
           </h2>
         </div>
-        <div
-          style={{
-            display: "inline-block",
-            background: "#eef2ff",
-            color: "#667eea",
-            borderRadius: 20,
-            padding: "3px 12px",
-            fontSize: 11,
-            fontWeight: 600,
-            textTransform: "uppercase",
-            letterSpacing: 0.5,
-          }}
-        >
-          {mode === "comparison"
-            ? "Comparison Matrix"
-            : mode === "argument_map"
-            ? "Argument Map"
-            : "Priority Ranker"}
-        </div>
+        {spec.badge && (
+          <div
+            style={{
+              display: "inline-block",
+              background: spec.theme?.accent ? `${spec.theme.accent}20` : "#eef2ff",
+              color: spec.theme?.accent ?? "#667eea",
+              borderRadius: 20,
+              padding: "3px 12px",
+              fontSize: 11,
+              fontWeight: 600,
+              textTransform: "uppercase",
+              letterSpacing: 0.5,
+              marginBottom: 4,
+            }}
+          >
+            {spec.badge}
+          </div>
+        )}
+        {spec.subtitle && (
+          <p style={{ fontSize: 14, color: "#64748b", margin: "4px 0 0" }}>
+            {spec.subtitle}
+          </p>
+        )}
       </div>
 
-      {/* Mode content */}
-      {mode === "comparison" && (
-        <ComparisonMatrix
-          options={options}
-          criteria={criteria}
-          scores={scores}
-          onWeightChange={handleWeightChange}
+      {/* Dynamic Layout */}
+      <SpecRenderer
+        nodes={spec.layout}
+        state={widgetState}
+        onStateChange={handleStateChange}
+        onDismiss={handleDismiss}
+        callTool={handleCallTool}
+        sendFollowUpMessage={handleSendFollowUp}
+      />
+
+      {/* Footer: "What am I missing?" */}
+      {spec.footer && (
+        <MissingInput
+          onSubmit={handleMissingInput}
+          isPending={isUpdating}
         />
       )}
 
-      {mode === "argument_map" && (
-        <ArgumentMap
-          sideA={sideA}
-          sideB={sideB}
-          onStrengthChange={handleStrengthChange}
-          onDismiss={handleDismissArg}
-        />
+      {/* Action buttons */}
+      {spec.actions && spec.actions.length > 0 && (
+        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
+          {spec.actions.map((action, i) => {
+            const isPrimary = action.variant === "primary";
+            const isActionPending =
+              action.toolName === "forge_conclude" ? isConcluding : isUpdating;
+            return (
+              <button
+                key={i}
+                onClick={() => handleAction(action)}
+                disabled={isActionPending}
+                style={{
+                  flex: isPrimary ? 1 : undefined,
+                  padding: "12px 20px",
+                  borderRadius: 12,
+                  border: "none",
+                  background: isActionPending
+                    ? "#cbd5e1"
+                    : isPrimary
+                    ? "linear-gradient(135deg, #667eea, #764ba2)"
+                    : "#f1f5f9",
+                  color: isPrimary ? "#ffffff" : "#475569",
+                  fontSize: 15,
+                  fontWeight: 700,
+                  cursor: isActionPending ? "not-allowed" : "pointer",
+                  fontFamily: "system-ui, sans-serif",
+                  transition: "opacity 0.2s",
+                }}
+              >
+                {action.icon && <span style={{ marginRight: 6 }}>{action.icon}</span>}
+                {isActionPending ? "Working..." : action.label}
+              </button>
+            );
+          })}
+        </div>
       )}
 
-      {mode === "ranker" && (
-        <PriorityRanker
-          items={items}
-          onScoreChange={handleScoreChange}
-          onDismiss={handleDismissItem}
-        />
-      )}
-
-      {/* Shared bottom section */}
-      <MissingInput onSubmit={handleAskMissing} isPending={isAddingFactor} />
-
-      <button
-        onClick={handleVerdict}
-        disabled={isGeneratingVerdict}
-        style={{
-          width: "100%",
-          marginTop: 16,
-          padding: "12px 0",
-          borderRadius: 12,
-          border: "none",
-          background: isGeneratingVerdict
-            ? "#cbd5e1"
-            : "linear-gradient(135deg, #667eea, #764ba2)",
-          color: "#ffffff",
-          fontSize: 15,
-          fontWeight: 700,
-          cursor: isGeneratingVerdict ? "not-allowed" : "pointer",
-          fontFamily: "system-ui, sans-serif",
-          transition: "opacity 0.2s",
-        }}
-      >
-        {isGeneratingVerdict ? "Generating verdict..." : "🎯 Give me verdict"}
-      </button>
-
+      {/* Verdict panel */}
       {verdict && <VerdictPanel verdict={verdict} />}
     </div>
   );
