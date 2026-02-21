@@ -36,7 +36,7 @@ class ComponentErrorBoundary extends Component<
             fontFamily: "system-ui, sans-serif",
           }}
         >
-          ⚠ Could not render: {this.props.fallback}
+          Could not render: {this.props.fallback}
         </div>
       );
     }
@@ -44,7 +44,24 @@ class ComponentErrorBoundary extends Component<
   }
 }
 
-function renderComponent(
+// ── Unified node renderer — handles both containers and leaves ──
+function renderNode(
+  node: LayoutNode,
+  index: number,
+  props: Omit<SpecRendererProps, "nodes">
+): React.ReactNode {
+  if (!node || !node.type) return null;
+
+  // If it's a container, render the container wrapper + recurse into children
+  if (isContainerNode(node)) {
+    return renderContainer(node, index, props);
+  }
+
+  // Otherwise it's a leaf component
+  return renderLeaf(node as ComponentNode, index, props);
+}
+
+function renderLeaf(
   node: ComponentNode,
   index: number,
   props: Omit<SpecRendererProps, "nodes">
@@ -52,14 +69,8 @@ function renderComponent(
   if (!node || !node.type) return null;
   const Component = componentRegistry[node.type];
   if (!Component) {
-    return (
-      <div
-        key={`unknown-${index}`}
-        style={{ padding: 4, fontSize: 11, color: "#94a3b8", fontFamily: "system-ui" }}
-      >
-        Unknown component: {node.type}
-      </div>
-    );
+    // Silently skip unknown types rather than showing error text
+    return null;
   }
   const key = (node as any).id ?? `${node.type}-${index}`;
   return (
@@ -76,9 +87,76 @@ function renderComponent(
   );
 }
 
+function renderContainer(
+  node: any,
+  index: number,
+  props: Omit<SpecRendererProps, "nodes">
+): React.ReactNode {
+  const gap = node.gap ?? 16;
+  const children: LayoutNode[] = node.children ?? [];
+  const key = (node as any).id ?? `container-${node.type}-${index}`;
+
+  if (node.type === "tabs" && node.tabLabels) {
+    return (
+      <TabContainer
+        key={key}
+        labels={node.tabLabels}
+        children={children}
+        renderProps={props}
+      />
+    );
+  }
+
+  if (node.type === "columns" || node.type === "grid") {
+    return (
+      <div
+        key={key}
+        style={{
+          display: "grid",
+          gridTemplateColumns: `repeat(${node.columns ?? 2}, 1fr)`,
+          gap,
+        }}
+      >
+        {children.map((child, j) => renderNode(child, j, props))}
+      </div>
+    );
+  }
+
+  if (node.type === "row") {
+    return (
+      <div
+        key={key}
+        style={{
+          display: "flex",
+          flexDirection: "row",
+          gap,
+          alignItems: "flex-start",
+          flexWrap: "wrap",
+        }}
+      >
+        {children.map((child, j) => renderNode(child, j, props))}
+      </div>
+    );
+  }
+
+  // stack (default container)
+  return (
+    <div
+      key={key}
+      style={{
+        display: "flex",
+        flexDirection: "column",
+        gap: node.gap ?? 12,
+      }}
+    >
+      {children.map((child, j) => renderNode(child, j, props))}
+    </div>
+  );
+}
+
 const TabContainer: React.FC<{
   labels: string[];
-  children: ComponentNode[];
+  children: LayoutNode[];
   renderProps: Omit<SpecRendererProps, "nodes">;
 }> = ({ labels, children, renderProps }) => {
   const [activeTab, setActiveTab] = useState(0);
@@ -110,7 +188,7 @@ const TabContainer: React.FC<{
       </div>
       <div>
         {children.slice(activeTab * perTab, (activeTab + 1) * perTab).map((child, i) =>
-          renderComponent(child, activeTab * perTab + i, renderProps)
+          renderNode(child, activeTab * perTab + i, renderProps)
         )}
       </div>
     </div>
@@ -133,74 +211,7 @@ export const SpecRenderer: React.FC<SpecRendererProps> = ({
 
   return (
     <>
-      {nodes.map((node, i) => {
-        if (!node || !node.type) return null;
-
-        if (isContainerNode(node)) {
-          const gap = node.gap ?? 16;
-          const children = node.children ?? [];
-
-          if (node.type === "tabs" && node.tabLabels) {
-            return (
-              <TabContainer
-                key={i}
-                labels={node.tabLabels}
-                children={children}
-                renderProps={renderProps}
-              />
-            );
-          }
-
-          if (node.type === "columns" || node.type === "grid") {
-            return (
-              <div
-                key={i}
-                style={{
-                  display: "grid",
-                  gridTemplateColumns: `repeat(${node.columns ?? 2}, 1fr)`,
-                  gap,
-                }}
-              >
-                {children.map((child, j) => renderComponent(child, j, renderProps))}
-              </div>
-            );
-          }
-
-          if (node.type === "row") {
-            return (
-              <div
-                key={i}
-                style={{
-                  display: "flex",
-                  flexDirection: "row",
-                  gap,
-                  alignItems: "flex-start",
-                  flexWrap: "wrap",
-                }}
-              >
-                {children.map((child, j) => renderComponent(child, j, renderProps))}
-              </div>
-            );
-          }
-
-          // stack (default)
-          return (
-            <div
-              key={i}
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: node.gap ?? 12,
-              }}
-            >
-              {children.map((child, j) => renderComponent(child, j, renderProps))}
-            </div>
-          );
-        }
-
-        // Leaf component
-        return renderComponent(node as ComponentNode, i, renderProps);
-      })}
+      {nodes.map((node, i) => renderNode(node, i, renderProps))}
     </>
   );
 };

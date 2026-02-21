@@ -3,9 +3,10 @@ import React, { useState } from "react";
 interface MissingInputProps {
   onSubmit: (text: string) => void;
   isPending?: boolean;
+  placeholder?: string;
 }
 
-export const MissingInput: React.FC<MissingInputProps> = ({ onSubmit, isPending }) => {
+export const MissingInput: React.FC<MissingInputProps> = ({ onSubmit, isPending, placeholder }) => {
   const [value, setValue] = useState("");
 
   const handleSubmit = () => {
@@ -22,7 +23,7 @@ export const MissingInput: React.FC<MissingInputProps> = ({ onSubmit, isPending 
         value={value}
         onChange={(e) => setValue(e.target.value)}
         onKeyDown={(e) => e.key === "Enter" && handleSubmit()}
-        placeholder="What am I missing? Add a consideration..."
+        placeholder={placeholder ?? "What am I missing? Add a consideration..."}
         disabled={isPending}
         style={{
           flex: 1,

@@ -101,6 +101,28 @@ function extractVerdict(raw: any): Verdict | null {
   return null;
 }
 
+// Format widget state into a human-readable summary for the AI
+function formatStateForChat(state: Record<string, any>, specTitle: string): string {
+  const entries = Object.entries(state).filter(([k]) => !k.startsWith("dismissed."));
+  if (entries.length === 0) return `[Forge workspace: "${specTitle}"] No user input yet.`;
+
+  const lines = entries.map(([k, v]) => {
+    if (typeof v === "boolean") return `  - ${k}: ${v ? "Yes" : "No"}`;
+    if (typeof v === "number") return `  - ${k}: ${v}`;
+    return `  - ${k}: ${v}`;
+  });
+
+  const dismissed = Object.entries(state)
+    .filter(([k, v]) => k.startsWith("dismissed.") && v)
+    .map(([k]) => k.replace("dismissed.", ""));
+
+  let summary = `[Forge workspace: "${specTitle}"]\nUser inputs:\n${lines.join("\n")}`;
+  if (dismissed.length > 0) {
+    summary += `\nDismissed: ${dismissed.join(", ")}`;
+  }
+  return summary;
+}
+
 // ── Main Component ─────────────────────────────────────────────
 const ForgeBoard: React.FC = () => {
   const { props, isPending, sendFollowUpMessage } = useWidget();
@@ -112,6 +134,7 @@ const ForgeBoard: React.FC = () => {
   const [widgetState, setWidgetState] = useState<Record<string, any>>({});
   const [verdict, setVerdict] = useState<Verdict | null>(null);
   const [debugInfo, setDebugInfo] = useState<string>("");
+  const [saveFlash, setSaveFlash] = useState(false);
   const prevTitle = useRef<string>("");
 
   // ── Process incoming props — flexible shape detection ───────
@@ -184,6 +207,7 @@ const ForgeBoard: React.FC = () => {
         if (toolName === "forge_update") {
           callForgeUpdate(args);
         } else if (toolName === "forge_conclude") {
+          // Always include full widget state when concluding
           callForgeConclude({
             winner: "",
             confidence: 50,
@@ -209,6 +233,8 @@ const ForgeBoard: React.FC = () => {
     (text: string) => {
       if (!spec) return;
       try {
+        // Send as follow-up so AI has context, AND add as card
+        sendFollowUpMessage?.(`I'm adding "${text}" to my workspace. Please factor this in.`);
         callForgeUpdate({
           operation: "add",
           components: [
@@ -218,8 +244,17 @@ const ForgeBoard: React.FC = () => {
         });
       } catch {}
     },
-    [spec, callForgeUpdate]
+    [spec, callForgeUpdate, sendFollowUpMessage]
   );
+
+  // Save all widget state to chat context
+  const handleSaveProgress = useCallback(() => {
+    if (!spec || !sendFollowUpMessage) return;
+    const summary = formatStateForChat(widgetState, spec.title);
+    sendFollowUpMessage(summary);
+    setSaveFlash(true);
+    setTimeout(() => setSaveFlash(false), 2000);
+  }, [spec, widgetState, sendFollowUpMessage]);
 
   const handleAction = useCallback(
     (action: any) => {
@@ -234,12 +269,18 @@ const ForgeBoard: React.FC = () => {
             }
           }
         }
+        // Always include full state summary for tool calls
+        args._allState = widgetState;
         handleCallTool(action.toolName, args);
       } else if (action.action === "follow_up" && action.message) {
-        handleSendFollowUp(action.message);
+        // Include state context in follow-up messages
+        const stateContext = Object.keys(widgetState).length > 0
+          ? `\n\n${formatStateForChat(widgetState, spec?.title ?? "")}`
+          : "";
+        handleSendFollowUp(action.message + stateContext);
       }
     },
-    [widgetState, handleCallTool, handleSendFollowUp]
+    [widgetState, handleCallTool, handleSendFollowUp, spec]
   );
 
   // ── Render: Loading ────────────────────────────────────────
@@ -252,7 +293,7 @@ const ForgeBoard: React.FC = () => {
     return (
       <div style={{ fontFamily: "system-ui, sans-serif", padding: 24, background: "#f8fafc", borderRadius: 16 }}>
         <div style={{ fontSize: 16, fontWeight: 700, color: "#1e293b", marginBottom: 8 }}>
-          ⚡ Forge — Waiting for spec
+          Forge — Waiting for spec
         </div>
         <p style={{ fontSize: 13, color: "#64748b", marginBottom: 12 }}>
           The widget loaded but no valid spec was detected in the props.
@@ -274,6 +315,8 @@ const ForgeBoard: React.FC = () => {
       </div>
     );
   }
+
+  const hasState = Object.keys(widgetState).length > 0;
 
   // ── Render: Full widget ────────────────────────────────────
   return (
@@ -336,45 +379,71 @@ const ForgeBoard: React.FC = () => {
 
       {/* Footer */}
       {spec.footer && (
-        <MissingInput onSubmit={handleMissingInput} isPending={isUpdating} />
-      )}
-
-      {/* Action buttons */}
-      {spec.actions && spec.actions.length > 0 && (
-        <div style={{ display: "flex", gap: 8, marginTop: 16 }}>
-          {spec.actions.map((action, i) => {
-            const isPrimary = action.variant === "primary";
-            const isActionPending = action.toolName === "forge_conclude" ? isConcluding : isUpdating;
-            return (
-              <button
-                key={i}
-                onClick={() => handleAction(action)}
-                disabled={isActionPending}
-                style={{
-                  flex: isPrimary ? 1 : undefined,
-                  padding: "12px 20px",
-                  borderRadius: 12,
-                  border: "none",
-                  background: isActionPending
-                    ? "#cbd5e1"
-                    : isPrimary
-                    ? "linear-gradient(135deg, #667eea, #764ba2)"
-                    : "#f1f5f9",
-                  color: isPrimary ? "#ffffff" : "#475569",
-                  fontSize: 15,
-                  fontWeight: 700,
-                  cursor: isActionPending ? "not-allowed" : "pointer",
-                  fontFamily: "system-ui, sans-serif",
-                  transition: "opacity 0.2s",
-                }}
-              >
-                {action.icon && <span style={{ marginRight: 6 }}>{action.icon}</span>}
-                {isActionPending ? "Working..." : action.label}
-              </button>
-            );
-          })}
+        <div style={{ marginTop: 16 }}>
+          <MissingInput
+            onSubmit={handleMissingInput}
+            isPending={isUpdating}
+            placeholder={spec.footer.placeholder}
+          />
         </div>
       )}
+
+      {/* Action buttons + Save Progress */}
+      <div style={{ display: "flex", gap: 8, marginTop: 16, flexWrap: "wrap" }}>
+        {/* Save Progress — always visible when there's state */}
+        {hasState && (
+          <button
+            onClick={handleSaveProgress}
+            style={{
+              padding: "12px 20px",
+              borderRadius: 12,
+              border: "none",
+              background: saveFlash ? "#22c55e" : "#f1f5f9",
+              color: saveFlash ? "#ffffff" : "#475569",
+              fontSize: 14,
+              fontWeight: 600,
+              cursor: "pointer",
+              fontFamily: "system-ui, sans-serif",
+              transition: "all 0.3s",
+            }}
+          >
+            {saveFlash ? "Saved to chat!" : "Save Progress"}
+          </button>
+        )}
+
+        {/* Spec-defined action buttons */}
+        {spec.actions && spec.actions.map((action, i) => {
+          const isPrimary = action.variant === "primary";
+          const isActionPending = action.toolName === "forge_conclude" ? isConcluding : isUpdating;
+          return (
+            <button
+              key={i}
+              onClick={() => handleAction(action)}
+              disabled={isActionPending}
+              style={{
+                flex: isPrimary ? 1 : undefined,
+                padding: "12px 20px",
+                borderRadius: 12,
+                border: "none",
+                background: isActionPending
+                  ? "#cbd5e1"
+                  : isPrimary
+                  ? "linear-gradient(135deg, #667eea, #764ba2)"
+                  : "#f1f5f9",
+                color: isPrimary ? "#ffffff" : "#475569",
+                fontSize: 15,
+                fontWeight: 700,
+                cursor: isActionPending ? "not-allowed" : "pointer",
+                fontFamily: "system-ui, sans-serif",
+                transition: "opacity 0.2s",
+              }}
+            >
+              {action.icon && <span style={{ marginRight: 6 }}>{action.icon}</span>}
+              {isActionPending ? "Working..." : action.label}
+            </button>
+          );
+        })}
+      </div>
 
       {/* Verdict */}
       {verdict && <VerdictPanel verdict={verdict} />}
