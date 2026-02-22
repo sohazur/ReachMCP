@@ -21,28 +21,40 @@ import {
   CONNECTED_MCPS_COLLECTION,
 } from "./firebase.js";
 
-// ── Firebase Auth via Custom OAuth Provider ────────────────────
-// Uses Google's public JWKS to verify Firebase ID tokens — NO service account needed
+// ── Auth via Google OAuth (Firebase-compatible) ────────────────
+// Uses Google's standard OAuth2 endpoints (every Firebase project has Google Sign-In)
+// Verifies tokens using Google's public JWKS — NO service account needed
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID;
 const FIREBASE_API_KEY = process.env.FIREBASE_API_KEY;
+const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID;
+const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET;
 
-const FIREBASE_JWKS = createRemoteJWKSet(
-  new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
+const GOOGLE_JWKS = createRemoteJWKSet(
+  new URL("https://www.googleapis.com/oauth2/v3/certs")
 );
 
-const firebaseOAuth = FIREBASE_PROJECT_ID && FIREBASE_API_KEY
+const googleOAuth = GOOGLE_CLIENT_ID
   ? oauthCustomProvider({
-      issuer: `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`,
-      jwksUrl: `https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com`,
-      authEndpoint: `https://identitytoolkit.googleapis.com/v1/accounts:signInWithPassword?key=${FIREBASE_API_KEY}`,
-      tokenEndpoint: `https://securetoken.googleapis.com/v1/token?key=${FIREBASE_API_KEY}`,
+      issuer: "https://accounts.google.com",
+      jwksUrl: "https://www.googleapis.com/oauth2/v3/certs",
+      authEndpoint: "https://accounts.google.com/o/oauth2/v2/auth",
+      tokenEndpoint: "https://oauth2.googleapis.com/token",
+      scopesSupported: ["openid", "email", "profile"],
       verifyToken: async (token: string) => {
-        // Verify Firebase ID token using Google's public keys (no service account!)
-        const result = await jwtVerify(token, FIREBASE_JWKS, {
-          issuer: `https://securetoken.google.com/${FIREBASE_PROJECT_ID}`,
-          audience: FIREBASE_PROJECT_ID,
-        });
-        return result;
+        // Try verifying as a Google ID token (JWT)
+        try {
+          const result = await jwtVerify(token, GOOGLE_JWKS, {
+            issuer: "https://accounts.google.com",
+            audience: GOOGLE_CLIENT_ID,
+          });
+          return result;
+        } catch {
+          // Fallback: verify as access token via Google's tokeninfo endpoint
+          const res = await fetch(`https://oauth2.googleapis.com/tokeninfo?access_token=${token}`);
+          if (!res.ok) throw new Error("Invalid token");
+          const data = await res.json();
+          return { payload: data };
+        }
       },
       getUserInfo: (payload: Record<string, unknown>) => ({
         userId: payload.sub as string,
@@ -66,7 +78,7 @@ const server = new MCPServer({
   icons: [
     { src: "icon.svg", mimeType: "image/svg+xml", sizes: ["512x512"] },
   ],
-  ...(firebaseOAuth ? { oauth: firebaseOAuth } : {}),
+  ...(googleOAuth ? { oauth: googleOAuth } : {}),
 });
 
 // ── Helper: Get user ID from context (works with or without auth) ──
@@ -477,23 +489,55 @@ server.tool(
 );
 
 // ══════════════════════════════════════════════════════════════════
-// MCP-TO-MCP CONNECTIVITY (Future Architecture)
+// MCP-TO-MCP CONNECTIVITY — "The Last MCP You Need"
+// Connect external MCPs and use their tools directly from Forge
 // ══════════════════════════════════════════════════════════════════
+
+// ── Helper: Call an MCP server's JSON-RPC endpoint ──────────────
+async function mcpRequest(mcpUrl: string, method: string, params: any = {}): Promise<any> {
+  // Standard MCP protocol uses JSON-RPC 2.0 over HTTP
+  const url = mcpUrl.endsWith("/") ? `${mcpUrl}mcp` : `${mcpUrl}/mcp`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: Date.now(),
+      method,
+      params,
+    }),
+  });
+
+  if (!res.ok) {
+    throw new Error(`MCP server returned ${res.status}: ${res.statusText}`);
+  }
+
+  const data = await res.json();
+  if (data.error) {
+    throw new Error(data.error.message || "MCP error");
+  }
+  return data.result;
+}
 
 // ── Tool 8: forge_connect_mcp ──────────────────────────────────
 server.tool(
   {
     name: "forge_connect_mcp",
-    description: `Connect an external MCP server to Forge. This enables cross-MCP workflows — for example, connecting a LinkedIn MCP to automate outreach based on Forge analysis results, or a CRM MCP to push decisions into your pipeline.
+    description: `Connect an external MCP server to Forge. This enables cross-MCP workflows — Forge becomes your single gateway to ALL your MCP tools.
 
-The connected MCP's tools become available as actions within Forge workspaces. Currently stores the connection config; tool proxying is coming in a future release.`,
+After connecting, use forge_discover_tools to see what tools the MCP offers, then forge_proxy_tool to call any of its tools directly from Forge.
+
+Examples:
+- Connect Playwright MCP for browser automation
+- Connect a CRM MCP to push decisions into your pipeline
+- Connect a data MCP to pull live analytics into Forge workspaces`,
     schema: z.object({
       mcp_url: z
         .string()
-        .describe("The URL of the external MCP server to connect"),
+        .describe("The URL of the external MCP server (e.g., 'https://my-mcp.example.com')"),
       mcp_name: z
         .string()
-        .describe("A friendly name for this MCP (e.g., 'LinkedIn', 'Salesforce CRM')"),
+        .describe("A friendly name for this MCP (e.g., 'Playwright', 'Salesforce CRM')"),
       description: z
         .string()
         .optional()
@@ -504,12 +548,23 @@ The connected MCP's tools become available as actions within Forge workspaces. C
     try {
       const userId = getUserId(ctx) || "anonymous";
 
+      // Verify the MCP is reachable by trying to list its tools
+      let discoveredTools: string[] = [];
+      try {
+        const result = await mcpRequest(mcp_url, "tools/list");
+        discoveredTools = (result.tools || []).map((t: any) => t.name);
+      } catch (e) {
+        // Still save the connection even if discovery fails (MCP might need auth)
+        console.warn("[forge_connect_mcp] Discovery failed, saving anyway:", e);
+      }
+
       const connectionData = {
         user_id: userId,
         mcp_url,
         mcp_name,
         description: desc || "",
-        status: "connected",
+        discovered_tools: discoveredTools,
+        status: discoveredTools.length > 0 ? "active" : "connected",
         connected_at: serverTimestamp(),
       };
 
@@ -520,8 +575,11 @@ The connected MCP's tools become available as actions within Forge workspaces. C
         connection_id: docRef.id,
         mcp_name,
         mcp_url,
-        status: "connected",
-        message: `Connected "${mcp_name}". Its tools will be available in future Forge workspaces. Cross-MCP actions are coming soon.`,
+        status: connectionData.status,
+        discovered_tools: discoveredTools,
+        message: discoveredTools.length > 0
+          ? `Connected "${mcp_name}" with ${discoveredTools.length} tools: ${discoveredTools.join(", ")}. Use forge_proxy_tool to call any of them.`
+          : `Connected "${mcp_name}". Use forge_discover_tools to see available tools once the MCP is ready.`,
       });
     } catch (err) {
       console.error("[forge_connect_mcp] Error:", err);
@@ -530,11 +588,123 @@ The connected MCP's tools become available as actions within Forge workspaces. C
   }
 );
 
-// ── Tool 9: forge_list_connected_mcps ──────────────────────────
+// ── Tool 9: forge_discover_tools ───────────────────────────────
+server.tool(
+  {
+    name: "forge_discover_tools",
+    description: `Discover all available tools from a connected MCP server. Returns tool names, descriptions, and input schemas so you know exactly what's available.`,
+    schema: z.object({
+      mcp_name: z
+        .string()
+        .describe("The friendly name of the connected MCP to discover tools from"),
+    }),
+  },
+  async ({ mcp_name }, ctx) => {
+    try {
+      const userId = getUserId(ctx) || "anonymous";
+
+      // Find the connected MCP by name
+      const q = query(
+        collection(db, CONNECTED_MCPS_COLLECTION),
+        where("user_id", "==", userId),
+        where("mcp_name", "==", mcp_name)
+      );
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        return error(`No connected MCP named "${mcp_name}". Use forge_list_connected_mcps to see your connections.`);
+      }
+
+      const mcpData = snapshot.docs[0].data();
+      const result = await mcpRequest(mcpData.mcp_url, "tools/list");
+      const tools = (result.tools || []).map((t: any) => ({
+        name: t.name,
+        description: t.description || "",
+        inputSchema: t.inputSchema || {},
+      }));
+
+      // Update the stored tools list
+      await updateDoc(snapshot.docs[0].ref, {
+        discovered_tools: tools.map((t: any) => t.name),
+        status: "active",
+      });
+
+      return object({
+        mcp_name,
+        mcp_url: mcpData.mcp_url,
+        tools,
+        total: tools.length,
+        message: `${mcp_name} has ${tools.length} tools available. Use forge_proxy_tool to call any of them.`,
+      });
+    } catch (err) {
+      console.error("[forge_discover_tools] Error:", err);
+      return error(`Failed to discover tools: ${err instanceof Error ? err.message : "Unknown error"}`);
+    }
+  }
+);
+
+// ── Tool 10: forge_proxy_tool ──────────────────────────────────
+server.tool(
+  {
+    name: "forge_proxy_tool",
+    description: `Call a tool on a connected external MCP server. This is how Forge acts as your single gateway — you can use ANY tool from ANY connected MCP without switching clients.
+
+First use forge_discover_tools to see available tools and their schemas, then call them here.`,
+    schema: z.object({
+      mcp_name: z
+        .string()
+        .describe("The friendly name of the connected MCP"),
+      tool_name: z
+        .string()
+        .describe("The name of the tool to call on the connected MCP"),
+      arguments: z
+        .any()
+        .optional()
+        .describe("The arguments to pass to the tool (must match the tool's input schema)"),
+    }),
+  },
+  async ({ mcp_name, tool_name, arguments: toolArgs }, ctx) => {
+    try {
+      const userId = getUserId(ctx) || "anonymous";
+
+      // Find the connected MCP by name
+      const q = query(
+        collection(db, CONNECTED_MCPS_COLLECTION),
+        where("user_id", "==", userId),
+        where("mcp_name", "==", mcp_name)
+      );
+      const snapshot = await getDocs(q);
+
+      if (snapshot.empty) {
+        return error(`No connected MCP named "${mcp_name}". Use forge_connect_mcp first.`);
+      }
+
+      const mcpData = snapshot.docs[0].data();
+
+      // Call the tool on the external MCP
+      const result = await mcpRequest(mcpData.mcp_url, "tools/call", {
+        name: tool_name,
+        arguments: toolArgs || {},
+      });
+
+      return object({
+        mcp_name,
+        tool_name,
+        result: result.content || result,
+        isError: result.isError || false,
+      });
+    } catch (err) {
+      console.error("[forge_proxy_tool] Error:", err);
+      return error(`Failed to call ${tool_name} on ${mcp_name}: ${err instanceof Error ? err.message : "Unknown error"}`);
+    }
+  }
+);
+
+// ── Tool 11: forge_list_connected_mcps ──────────────────────────
 server.tool(
   {
     name: "forge_list_connected_mcps",
-    description: `List all external MCP servers connected to the user's Forge account. Shows connection status and available integrations.`,
+    description: `List all external MCP servers connected to the user's Forge account. Shows connection status, available tools, and integrations.`,
     schema: z.object({}),
   },
   async (_args, ctx) => {
@@ -555,11 +725,12 @@ server.tool(
         mcp_url: d.data().mcp_url,
         description: d.data().description,
         status: d.data().status,
+        discovered_tools: d.data().discovered_tools || [],
         connected_at: d.data().connected_at?.toDate?.()?.toISOString?.() || null,
       }));
 
       if (connections.length === 0) {
-        return text("No connected MCPs. Use forge_connect_mcp to link external services like LinkedIn, CRM, or custom tools.");
+        return text("No connected MCPs yet. Use forge_connect_mcp to link external MCP servers like Playwright, CRM tools, or any other MCP. Forge becomes your single gateway to all MCP tools.");
       }
 
       return object({ connections, total: connections.length });
@@ -573,5 +744,5 @@ server.tool(
 // ── Start Server ───────────────────────────────────────────────
 server.listen().then(() => {
   console.log("Forge v2 server running");
-  console.log(`Auth: ${firebaseOAuth ? "Firebase OAuth enabled" : "No auth (anonymous mode)"}`);
+  console.log(`Auth: ${googleOAuth ? "Google OAuth enabled" : "No auth (anonymous mode)"}`);
 });

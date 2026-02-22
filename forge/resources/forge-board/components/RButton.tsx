@@ -35,7 +35,10 @@ export const RButton: React.FC<RenderProps> = ({ node, state, callTool, sendFoll
       }
       callTool(n.toolName, args);
     } else if (n.action === "follow_up" && sendFollowUpMessage && n.message) {
-      sendFollowUpMessage(n.message);
+      // Include state context and instruct AI to use forge_update for in-widget results
+      const stateEntries = state ? Object.entries(state).filter(([k, v]) => v !== "" && v !== undefined).map(([k, v]) => `  ${k}: ${v}`).join("\n") : "";
+      const fullMessage = `${n.message}${stateEntries ? `\n\nCurrent widget state:\n${stateEntries}` : ""}\n\nIMPORTANT: Use forge_update tool to add results as new components in the workspace widget. Then also provide a brief summary in chat.`;
+      sendFollowUpMessage(fullMessage);
     }
   };
 

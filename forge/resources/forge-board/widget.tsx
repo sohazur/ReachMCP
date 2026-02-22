@@ -336,11 +336,12 @@ const ForgeBoard: React.FC = () => {
     [sendFollowUpMessage]
   );
 
-  // Footer "What am I missing?" — adds card in-widget + notifies AI
+  // Footer "What am I missing?" — adds card in-widget + tells AI to analyze it
   const handleMissingInput = useCallback(
     (text: string) => {
       if (!spec) return;
       try {
+        // First, immediately add a card to the widget so user sees their input
         callForgeUpdate({
           operation: "add",
           components: [
@@ -350,9 +351,15 @@ const ForgeBoard: React.FC = () => {
         });
         addActivity(`Added: "${text}"`);
         showToast("Added to workspace");
+
+        // Also notify AI to analyze/incorporate this new consideration
+        const stateContext = formatStateForAI(widgetState, spec.title);
+        sendFollowUpMessage?.(
+          `The user added a new consideration to the workspace: "${text}"\n\n${stateContext}\n\nPlease analyze this new factor in context of the existing workspace. Use forge_update to add relevant analysis components (like cards with insights, updated scores, or new data). Then briefly acknowledge in chat.`
+        );
       } catch {}
     },
-    [spec, callForgeUpdate, addActivity, showToast]
+    [spec, callForgeUpdate, addActivity, showToast, widgetState, sendFollowUpMessage]
   );
 
   // Save progress to Firebase + chat context
@@ -424,11 +431,12 @@ const ForgeBoard: React.FC = () => {
         showToast("Processing...");
       } else if (action.action === "follow_up" && action.message) {
         // Send the action message WITH full accumulated state context
+        // Instruct the AI to ALWAYS use forge_update so results appear in-widget
         const stateContext = formatStateForAI(widgetState, spec?.title ?? "");
-        const fullMessage = `${action.message}\n\n${stateContext}\n\nPlease analyze based on all my inputs above and respond. If you can update the workspace with results, use forge_update to add them. Otherwise respond in chat.`;
+        const fullMessage = `${action.message}\n\n${stateContext}\n\nIMPORTANT: You MUST use the forge_update tool to add your analysis results as new components in the workspace widget. Use operation "add" with components like cards, headings, text, tables, or any layout that best presents the results. After updating the widget, also provide a brief summary in chat. Do NOT just respond in chat — the user expects to see results IN the widget first.`;
         handleSendFollowUp(fullMessage);
         addActivity(`Requested: ${action.label}`);
-        showToast("Sent to AI — results will appear here or in chat");
+        showToast("Processing — results will appear below...");
       }
     },
     [widgetState, handleCallTool, handleSendFollowUp, spec, addActivity, showToast]
