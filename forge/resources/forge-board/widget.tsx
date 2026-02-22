@@ -408,11 +408,13 @@ const ForgeBoard: React.FC = () => {
     addActivity("Requested saved sessions");
   }, [sendFollowUpMessage, addActivity]);
 
-  // Action buttons — the ONLY place that sends comprehensive state to AI
+  // Action buttons — handles both call_tool and follow_up actions
+  // follow_up actions are converted to forge_conclude calls so results always appear in-widget
   const handleAction = useCallback(
     (action: any) => {
+      const stateContext = formatStateForAI(widgetState, spec?.title ?? "");
+
       if (action.action === "call_tool" && action.toolName) {
-        const stateContext = formatStateForAI(widgetState, spec?.title ?? "");
         const args: Record<string, any> = { _userContext: stateContext };
 
         // Collect specific state keys if requested
@@ -429,17 +431,30 @@ const ForgeBoard: React.FC = () => {
         handleCallTool(action.toolName, args);
         addActivity(`Requested: ${action.label}`);
         showToast("Processing...");
-      } else if (action.action === "follow_up" && action.message) {
-        // Send the action message WITH full accumulated state context
-        // Instruct the AI to ALWAYS use forge_update so results appear in-widget
-        const stateContext = formatStateForAI(widgetState, spec?.title ?? "");
-        const fullMessage = `${action.message}\n\n${stateContext}\n\nIMPORTANT: You MUST use the forge_update tool to add your analysis results as new components in the workspace widget. Use operation "add" with components like cards, headings, text, tables, or any layout that best presents the results. After updating the widget, also provide a brief summary in chat. Do NOT just respond in chat — the user expects to see results IN the widget first.`;
-        handleSendFollowUp(fullMessage);
+      } else if (action.action === "follow_up") {
+        // Convert follow_up to a direct forge_conclude call so it works
+        // even without an AI model in the loop (e.g., MCP Inspector)
+        const message = action.message || action.label || "Summarize";
+        callForgeConclude({
+          winner: "",
+          confidence: 50,
+          reasoning: "",
+          next_steps: [],
+          _userContext: stateContext,
+          _request: message,
+          _allState: widgetState,
+        });
+        // Also try sendFollowUpMessage for AI-connected environments
+        try {
+          sendFollowUpMessage?.(
+            `${message}\n\n${stateContext}\n\nUse forge_update to add analysis results to the workspace widget, then summarize in chat.`
+          );
+        } catch {}
         addActivity(`Requested: ${action.label}`);
-        showToast("Processing — results will appear below...");
+        showToast("Processing...");
       }
     },
-    [widgetState, handleCallTool, handleSendFollowUp, spec, addActivity, showToast]
+    [widgetState, handleCallTool, callForgeConclude, sendFollowUpMessage, spec, addActivity, showToast]
   );
 
   // ── Render: Loading ────────────────────────────────────────

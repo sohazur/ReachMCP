@@ -230,7 +230,9 @@ This is called when the user adds a new consideration via the "What am I missing
 server.tool(
   {
     name: "forge_conclude",
-    description: `Generate a conclusion, verdict, or summary for the current analysis. Reference the specific factors the user weighted highest or interacted with most. The widget displays this as a prominent verdict panel.`,
+    description: `Generate a conclusion, verdict, or summary for the current analysis. Reference the specific factors the user weighted highest or interacted with most. The widget displays this as a prominent verdict panel.
+
+When called from widget buttons, extra fields _userContext, _request, and _allState may be present with the user's current workspace state. Use this context to generate a meaningful summary.`,
     schema: z.object({
       winner: z
         .string()
@@ -246,6 +248,22 @@ server.tool(
       next_steps: z
         .array(z.string())
         .describe("3 concrete next steps"),
+      _userContext: z
+        .string()
+        .optional()
+        .describe("Widget state summary (auto-provided by widget)"),
+      _request: z
+        .string()
+        .optional()
+        .describe("User's request from the button (auto-provided by widget)"),
+      _allState: z
+        .any()
+        .optional()
+        .describe("Full widget state object (auto-provided by widget)"),
+      _widgetState: z
+        .any()
+        .optional()
+        .describe("Widget state from action buttons"),
     }),
     widget: {
       name: "forge-board",
@@ -253,14 +271,42 @@ server.tool(
       invoked: "Conclusion ready",
     },
   },
-  async ({ winner, confidence, reasoning, next_steps }) => {
+  async ({ winner, confidence, reasoning, next_steps, _userContext, _request, _allState, _widgetState }) => {
+    // When called from widget buttons (follow_up converted to call_tool),
+    // the AI fields may be empty. Generate a summary from the state.
+    const state = _allState || _widgetState || {};
+    const stateEntries = Object.entries(state)
+      .filter(([k, v]) => !k.startsWith("_") && !k.startsWith("dismissed.") && v !== "" && v !== undefined)
+      .map(([k, v]) => `${k.replace(/\./g, " > ").replace(/_/g, " ")}: ${v}`);
+
+    const generatedWinner = winner || (stateEntries.length > 0
+      ? `Summary of ${stateEntries.length} selected items`
+      : "Your workspace analysis");
+
+    const generatedReasoning = reasoning || (stateEntries.length > 0
+      ? `Based on your selections: ${stateEntries.slice(0, 5).join("; ")}${stateEntries.length > 5 ? ` and ${stateEntries.length - 5} more factors` : ""}.${_request ? ` Request: ${_request}` : ""}`
+      : _userContext || "No specific inputs recorded yet. Add some selections and try again.");
+
+    const generatedSteps = next_steps.length > 0 ? next_steps : [
+      "Review the selections above",
+      "Adjust any weights or priorities",
+      "Click 'Give me verdict' for a detailed analysis",
+    ];
+
+    const verdict = {
+      winner: generatedWinner,
+      confidence: confidence || Math.min(95, 50 + stateEntries.length * 5),
+      reasoning: generatedReasoning,
+      next_steps: generatedSteps,
+    };
+
     return widget({
       props: {
         action: "conclude",
-        verdict: { winner, confidence, reasoning, next_steps },
+        verdict,
       },
-      output: text(reasoning),
-      message: reasoning,
+      output: text(verdict.reasoning),
+      message: verdict.reasoning,
     });
   }
 );
