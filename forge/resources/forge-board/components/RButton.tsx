@@ -35,21 +35,39 @@ export const RButton: React.FC<RenderProps> = ({ node, state, callTool, sendFoll
       }
       callTool(n.toolName, args);
     } else if (n.action === "follow_up") {
-      // Convert follow_up to a direct forge_conclude call so it works
-      // even without an AI model in the loop
-      if (callTool) {
-        callTool("forge_conclude", {
-          winner: "",
-          confidence: 50,
-          reasoning: "",
-          next_steps: [],
-          _request: n.message || n.label,
-          _allState: state || {},
-        });
+      const message = n.message || n.label || "Analyze";
+      const stateEntries = state
+        ? Object.entries(state)
+            .filter(([k, v]) => !k.startsWith("dismissed.") && v !== "" && v !== undefined)
+            .map(([k, v]) => `${k}: ${v}`)
+            .join("; ")
+        : "";
+
+      // Send to AI (works in ChatGPT) with instruction to use forge_update
+      if (sendFollowUpMessage) {
+        try {
+          sendFollowUpMessage(
+            `${message}${stateEntries ? `\n\nUser inputs: ${stateEntries}` : ""}\n\nIMPORTANT: Use forge_update to add results as new components in the workspace, then summarize in chat.`
+          );
+        } catch {}
       }
-      // Also try sendFollowUpMessage for AI-connected environments
-      if (sendFollowUpMessage && n.message) {
-        try { sendFollowUpMessage(n.message); } catch {}
+
+      // Also call forge_update directly to add a feedback card in-widget
+      if (callTool) {
+        callTool("forge_update", {
+          operation: "add",
+          components: [
+            {
+              type: "card",
+              id: `action-${Date.now()}`,
+              title: `${n.label}: Processing...`,
+              detail: stateEntries || "Waiting for AI response in chat.",
+              accentColor: "#2563EB",
+              dismissible: true,
+            },
+          ],
+          commentary: `User clicked: ${n.label}`,
+        });
       }
     }
   };
