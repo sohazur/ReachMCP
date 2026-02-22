@@ -173,7 +173,7 @@ const TabContainer: React.FC<{
               padding: "8px 16px",
               borderRadius: 8,
               border: "none",
-              background: i === activeTab ? "#667eea" : "#f1f5f9",
+              background: i === activeTab ? "#2563EB" : "#f1f5f9",
               color: i === activeTab ? "#ffffff" : "#64748b",
               fontSize: 13,
               fontWeight: 600,

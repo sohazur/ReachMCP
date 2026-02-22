@@ -53,7 +53,7 @@ export const RTextInput: React.FC<RenderProps> = ({ node, state, onStateChange }
           padding: "10px 16px",
           borderRadius: 10,
           border: "none",
-          background: saved ? "#22c55e" : value.trim() ? "#667eea" : "#e2e8f0",
+          background: saved ? "#22c55e" : value.trim() ? "#2563EB" : "#e2e8f0",
           color: value.trim() || saved ? "#ffffff" : "#94a3b8",
           fontSize: 13,
           fontWeight: 600,

@@ -8,7 +8,7 @@ interface VerdictPanelProps {
 export const VerdictPanel: React.FC<VerdictPanelProps> = ({ verdict }) => (
   <div
     style={{
-      background: "linear-gradient(135deg, #667eea, #764ba2)",
+      background: "#0F172A",
       borderRadius: 16,
       padding: 24,
       color: "#ffffff",

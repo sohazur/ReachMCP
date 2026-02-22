@@ -3,7 +3,7 @@ import type { RenderProps, ButtonNode } from "../types";
 
 const variantStyles: Record<string, React.CSSProperties> = {
   primary: {
-    background: "linear-gradient(135deg, #667eea, #764ba2)",
+    background: "#0F172A",
     color: "#ffffff",
   },
   secondary: {

@@ -147,12 +147,12 @@ const ActivityLog: React.FC<{ entries: string[] }> = ({ entries }) => {
       style={{
         marginTop: 12,
         padding: 12,
-        background: "#f0f9ff",
+        background: "#F8FAFC",
         borderRadius: 10,
-        border: "1px solid #bae6fd",
+        border: "1px solid #E2E8F0",
       }}
     >
-      <div style={{ fontSize: 11, fontWeight: 700, color: "#0369a1", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
+      <div style={{ fontSize: 11, fontWeight: 700, color: "#64748B", marginBottom: 6, textTransform: "uppercase", letterSpacing: 0.5 }}>
         Activity
       </div>
       {entries.slice(-5).map((entry, i) => (
@@ -162,7 +162,7 @@ const ActivityLog: React.FC<{ entries: string[] }> = ({ entries }) => {
             fontSize: 12,
             color: "#475569",
             padding: "3px 0",
-            borderBottom: i < entries.slice(-5).length - 1 ? "1px solid #e0f2fe" : "none",
+            borderBottom: i < entries.slice(-5).length - 1 ? "1px solid #E2E8F0" : "none",
             fontFamily: "system-ui, sans-serif",
           }}
         >
@@ -345,7 +345,7 @@ const ForgeBoard: React.FC = () => {
         callForgeUpdate({
           operation: "add",
           components: [
-            { type: "card", id: `user-${Date.now()}`, title: text, dismissible: true, accentColor: "#667eea" },
+            { type: "card", id: `user-${Date.now()}`, title: text, dismissible: true, accentColor: "#2563EB" },
           ],
           commentary: `User added: "${text}"`,
         });
@@ -536,8 +536,8 @@ const ForgeBoard: React.FC = () => {
           <div
             style={{
               display: "inline-block",
-              background: spec.theme?.accent ? `${spec.theme.accent}20` : "#eef2ff",
-              color: spec.theme?.accent ?? "#667eea",
+              background: spec.theme?.accent ? `${spec.theme.accent}20` : "#EFF6FF",
+              color: spec.theme?.accent ?? "#2563EB",
               borderRadius: 20,
               padding: "3px 12px",
               fontSize: 11,
@@ -610,7 +610,7 @@ const ForgeBoard: React.FC = () => {
             style={{
               padding: "10px 16px", borderRadius: 10,
               border: "1px solid #e2e8f0", background: "#ffffff",
-              color: "#667eea", fontSize: 13, fontWeight: 600,
+              color: "#2563EB", fontSize: 13, fontWeight: 600,
               cursor: "pointer", fontFamily: "system-ui, sans-serif",
             }}
           >
@@ -649,7 +649,7 @@ const ForgeBoard: React.FC = () => {
                   background: isActionPending
                     ? "#cbd5e1"
                     : isPrimary
-                    ? "linear-gradient(135deg, #667eea, #764ba2)"
+                    ? "#0F172A"
                     : "#f1f5f9",
                   color: isPrimary ? "#ffffff" : "#475569",
                   fontSize: 15,

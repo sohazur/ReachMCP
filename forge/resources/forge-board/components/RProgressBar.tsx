@@ -17,7 +17,7 @@ export const RProgressBar: React.FC<RenderProps> = ({ node }) => {
           }}
         >
           <span>{n.label}</span>
-          <span style={{ fontWeight: 700, color: n.color ?? "#667eea" }}>
+          <span style={{ fontWeight: 700, color: n.color ?? "#2563EB" }}>
             {n.value}%
           </span>
         </div>
@@ -34,7 +34,7 @@ export const RProgressBar: React.FC<RenderProps> = ({ node }) => {
           style={{
             width: `${Math.min(100, Math.max(0, n.value))}%`,
             height: "100%",
-            background: n.color ?? "#667eea",
+            background: n.color ?? "#2563EB",
             borderRadius: 4,
             transition: "width 0.4s ease",
           }}

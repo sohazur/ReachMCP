@@ -25,7 +25,7 @@ export const RSlider: React.FC<RenderProps> = ({ node, state, onStateChange }) =
         value={currentValue}
         min={n.min ?? 1}
         max={n.max ?? 10}
-        accentColor={n.accentColor ?? "#667eea"}
+        accentColor={n.accentColor ?? "#2563EB"}
         lowLabel={n.lowLabel}
         highLabel={n.highLabel}
         onChange={(v) => onStateChange(n.stateKey, v)}

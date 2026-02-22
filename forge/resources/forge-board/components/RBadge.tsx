@@ -5,8 +5,8 @@ export const RBadge: React.FC<RenderProps> = ({ node }) => (
   <span
     style={{
       display: "inline-block",
-      background: node.color ? `${node.color}20` : "#eef2ff",
-      color: node.color ?? "#667eea",
+      background: node.color ? `${node.color}20` : "#EFF6FF",
+      color: node.color ?? "#2563EB",
       borderRadius: 20,
       padding: "3px 12px",
       fontSize: 12,

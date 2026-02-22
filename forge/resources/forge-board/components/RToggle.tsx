@@ -23,7 +23,7 @@ export const RToggle: React.FC<RenderProps> = ({ node, state, onStateChange }) =
           width: 36,
           height: 20,
           borderRadius: 10,
-          background: checked ? "#667eea" : "#cbd5e1",
+          background: checked ? "#2563EB" : "#cbd5e1",
           position: "relative",
           transition: "background 0.2s",
           cursor: "pointer",

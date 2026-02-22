@@ -46,8 +46,8 @@ export const RTable: React.FC<RenderProps> = ({ node }) => {
                 style={{
                   ...cell,
                   fontWeight: 700,
-                  color: h.key === highlightCol ? "#667eea" : "#1e293b",
-                  background: h.key === highlightCol ? "#eef2ff" : "#f8fafc",
+                  color: h.key === highlightCol ? "#2563EB" : "#1e293b",
+                  background: h.key === highlightCol ? "#EFF6FF" : "#f8fafc",
                   textAlign: h.key === n.headers[0]?.key ? "left" : "center",
                 }}
               >
